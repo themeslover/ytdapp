@@ -69,7 +69,7 @@ object LocalMediaEngine {
         val audio = kind.equals("AUDIO", ignoreCase = true)
         return ApiClient.Format(
             url = mediaUrl.trim(),
-            ext = if (audio) "mp3" else "mp4",
+            ext = if (audio) "m4a" else "mp4",
             height = quality.filter(Char::isDigit).toIntOrNull(),
             abr = null,
             vcodec = if (audio) null else "*",
@@ -100,7 +100,7 @@ object LocalMediaEngine {
 
         if (kind.equals("AUDIO", ignoreCase = true)) {
             request.addOption("-x")
-            request.addOption("--audio-format", "mp3")
+            request.addOption("--audio-format", "m4a")
             request.addOption("--audio-quality", "0")
             request.addOption("--embed-metadata")
             request.addOption("--embed-thumbnail")
