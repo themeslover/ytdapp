@@ -9,6 +9,7 @@ import android.os.Bundle
 class AhDownloaderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+        AppContextHolder.context = applicationContext
         registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
             override fun onActivityResumed(activity: Activity) {
                 if (Build.VERSION.SDK_INT >= 37 &&
