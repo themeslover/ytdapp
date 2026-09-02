@@ -1,14 +1,9 @@
 package com.themeslover.ytdapp.download
 
-import kotlinx.serialization.Serializable
-
-@Serializable
 enum class MediaKind { VIDEO, AUDIO }
 
-@Serializable
 enum class DownloadState { QUEUED, RUNNING, PAUSED, COMPLETED, FAILED, SKIPPED }
 
-@Serializable
 data class DownloadRequest(
     val id: String,
     val sourceUrl: String,
@@ -23,7 +18,6 @@ data class DownloadRequest(
     val lastError: String? = null
 )
 
-@Serializable
 data class DownloadBatch(
     val id: String,
     val items: List<DownloadRequest>,
