@@ -49,41 +49,23 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
 
     fun search(baseUrl: String, query: String, limit: Int = 30): List<SearchItem> {
         val safeLimit = limit.coerceIn(1, 50)
-        val url = normalize(baseUrl) + "/search?q=" + URLEncoder.encode(query, "UTF-8") + "&limit=$safeLimit"
-        val items = get(url).optJSONArray("items") ?: return emptyList()
-        return buildList {
-            for (i in 0 until items.length()) {
-                val item = items.optJSONObject(i) ?: continue
-                val mediaUrl = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(SearchItem(
-                    item.optString("title", "Untitled"), mediaUrl,
-                    item.optLongOrNull("duration"),
-                    item.optString("thumbnail").takeIf { it.isNotBlank() },
-                    item.optString("channel").takeIf { it.isNotBlank() },
-                    item.optLongOrNull("view_count"),
-                    item.optString("upload_date").takeIf { it.isNotBlank() },
-                    item.optBoolean("live", false)
-                ))
-            }
+        return runCatching {
+            val url = normalize(baseUrl) + "/search?q=" + URLEncoder.encode(query, "UTF-8") + "&limit=$safeLimit"
+            val items = get(url).optJSONArray("items") ?: return@runCatching emptyList()
+            parseSearchArray(items)
+        }.getOrElse {
+            LocalMediaEngine.search(AppContextHolder.context ?: throw it, query, safeLimit)
         }
     }
 
     fun playlist(baseUrl: String, playlistUrl: String): List<PlaylistItem> {
-        val body = JSONObject().put("url", playlistUrl).toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(normalize(baseUrl) + "/playlist").post(body).build()
-        val items = executeJson(request).optJSONArray("items") ?: return emptyList()
-        return buildList {
-            for (i in 0 until items.length()) {
-                val item = items.optJSONObject(i) ?: continue
-                val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(PlaylistItem(
-                    item.optString("title", "Untitled"), url,
-                    item.optLongOrNull("duration"),
-                    item.optString("thumbnail").takeIf { it.isNotBlank() },
-                    item.optString("channel").takeIf { it.isNotBlank() },
-                    item.optInt("index").takeIf { it > 0 }
-                ))
-            }
+        return runCatching {
+            val body = JSONObject().put("url", playlistUrl).toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url(normalize(baseUrl) + "/playlist").post(body).build()
+            val items = executeJson(request).optJSONArray("items") ?: return@runCatching emptyList()
+            parsePlaylistArray(items)
+        }.getOrElse {
+            LocalMediaEngine.playlist(AppContextHolder.context ?: throw it, playlistUrl)
         }
     }
 
@@ -100,13 +82,7 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
             for (i in 0 until source.length()) {
                 val item = source.optJSONObject(i) ?: continue
                 val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(BatchItem(
-                    item.optString("title", "Untitled"), url,
-                    item.optLongOrNull("duration"),
-                    item.optString("thumbnail").takeIf { it.isNotBlank() },
-                    item.optString("channel").takeIf { it.isNotBlank() },
-                    item.optInt("index").takeIf { it > 0 }
-                ))
+                add(BatchItem(item.optString("title", "Untitled"), url, item.optLongOrNull("duration"), item.optString("thumbnail").takeIf { it.isNotBlank() }, item.optString("channel").takeIf { it.isNotBlank() }, item.optInt("index").takeIf { it > 0 }))
             }
         }
         val errors = buildList {
@@ -120,26 +96,46 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
     }
 
     fun resolve(baseUrl: String, mediaUrl: String, kind: String, quality: String): Format {
-        val payload = JSONObject().put("url", mediaUrl).put("mode", kind.lowercase()).put("quality", quality)
-        val body = payload.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder().url(normalize(baseUrl) + "/resolve").post(body).build()
-        val json = executeJson(request)
-        if (json.optString("type") != "media") throw IOException("This URL is a playlist. Use Download Playlist instead.")
-        val formats = json.optJSONArray("formats") ?: throw IOException("No downloadable formats returned")
-        val candidates = buildList {
-            for (i in 0 until formats.length()) {
-                val f = formats.optJSONObject(i) ?: continue
-                val direct = f.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(Format(direct, f.optString("ext").takeIf { it.isNotBlank() }, f.optInt("height").takeIf { it > 0 }, f.optDouble("abr").takeIf { !it.isNaN() && it > 0 }, f.optString("vcodec").takeIf { it.isNotBlank() }, f.optString("acodec").takeIf { it.isNotBlank() }))
+        return runCatching {
+            val payload = JSONObject().put("url", mediaUrl).put("mode", kind.lowercase()).put("quality", quality)
+            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder().url(normalize(baseUrl) + "/resolve").post(body).build()
+            val json = executeJson(request)
+            if (json.optString("type") != "media") throw IOException("This URL is a playlist. Use Download Playlist instead.")
+            val formats = json.optJSONArray("formats") ?: throw IOException("No downloadable formats returned")
+            val candidates = buildList {
+                for (i in 0 until formats.length()) {
+                    val f = formats.optJSONObject(i) ?: continue
+                    val direct = f.optString("url").takeIf { it.isNotBlank() } ?: continue
+                    add(Format(direct, f.optString("ext").takeIf { it.isNotBlank() }, f.optInt("height").takeIf { it > 0 }, f.optDouble("abr").takeIf { !it.isNaN() && it > 0 }, f.optString("vcodec").takeIf { it.isNotBlank() }, f.optString("acodec").takeIf { it.isNotBlank() }))
+                }
             }
+            val selected = choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
+            selected.copy(url = downloadUrl(baseUrl, mediaUrl, kind, quality))
+        }.getOrElse {
+            LocalMediaEngine.resolve(mediaUrl, kind, quality)
         }
-        val selected = choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
-        return selected.copy(url = downloadUrl(baseUrl, mediaUrl, kind, quality))
     }
 
     fun downloadUrl(baseUrl: String, mediaUrl: String, kind: String, quality: String): String {
         return normalize(baseUrl) + "/download?url=" + URLEncoder.encode(mediaUrl, "UTF-8") +
             "&mode=" + URLEncoder.encode(kind.lowercase(), "UTF-8") + "&quality=" + URLEncoder.encode(quality, "UTF-8")
+    }
+
+    private fun parseSearchArray(items: JSONArray): List<SearchItem> = buildList {
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            val mediaUrl = item.optString("url").takeIf { it.isNotBlank() } ?: continue
+            add(SearchItem(item.optString("title", "Untitled"), mediaUrl, item.optLongOrNull("duration"), item.optString("thumbnail").takeIf { it.isNotBlank() }, item.optString("channel").takeIf { it.isNotBlank() }, item.optLongOrNull("view_count"), item.optString("upload_date").takeIf { it.isNotBlank() }, item.optBoolean("live", false)))
+        }
+    }
+
+    private fun parsePlaylistArray(items: JSONArray): List<PlaylistItem> = buildList {
+        for (i in 0 until items.length()) {
+            val item = items.optJSONObject(i) ?: continue
+            val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
+            add(PlaylistItem(item.optString("title", "Untitled"), url, item.optLongOrNull("duration"), item.optString("thumbnail").takeIf { it.isNotBlank() }, item.optString("channel").takeIf { it.isNotBlank() }, item.optInt("index").takeIf { it > 0 }))
+        }
     }
 
     private fun choose(formats: List<Format>, kind: String, quality: String): Format? {
@@ -222,6 +218,10 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
         private const val API_PORT = 8000
         private const val DISCOVERY_TIMEOUT_MS = 180
     }
+}
+
+internal object AppContextHolder {
+    @Volatile var context: android.content.Context? = null
 }
 
 private fun JSONObject.optLongOrNull(name: String): Long? = if (isNull(name)) null else optLong(name).takeIf { it > 0 }
