@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun App() {
     val context = LocalContext.current
@@ -94,18 +96,7 @@ private fun App() {
         if (source.isBlank()) return
         val kind = if (audio) MediaKind.AUDIO else MediaKind.VIDEO
         val destination = createDestination(context, title, audio)
-        val request = OneTimeWorkRequestBuilder<DownloadWorker>()
-            .setInputData(workDataOf(
-                DownloadWorker.KEY_ID to UUID.randomUUID().toString(),
-                DownloadWorker.KEY_SOURCE to source,
-                DownloadWorker.KEY_TITLE to title.ifBlank { "AH Downloader" },
-                DownloadWorker.KEY_OUTPUT to destination.toString(),
-                DownloadWorker.KEY_KIND to kind.name,
-                DownloadWorker.KEY_QUALITY to quality
-            ))
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .addTag("ytd-download")
-            .build()
+        val request = buildDownloadRequest(source, title, destination, kind, quality)
         wm.enqueueUniqueWork("download-${request.id}", ExistingWorkPolicy.KEEP, request)
         message = "Added to download queue"
         tab = 2
@@ -211,12 +202,44 @@ private fun DownloadsScreen(modifier: Modifier, works: List<WorkInfo>, wm: WorkM
                     }
                     if (info.state == WorkInfo.State.FAILED) {
                         Text(info.outputData.getString("error") ?: "Download failed")
-                        OutlinedButton(onClick = { wm.enqueue(info.id) }) { Text("Retry") }
+                        OutlinedButton(onClick = { retryWork(wm, info) }) { Text("Retry") }
                     }
                 }
             }
         }
     }
+}
+
+private fun buildDownloadRequest(source: String, title: String, destination: Uri, kind: MediaKind, quality: String): OneTimeWorkRequest =
+    OneTimeWorkRequestBuilder<DownloadWorker>()
+        .setInputData(workDataOf(
+            DownloadWorker.KEY_ID to UUID.randomUUID().toString(),
+            DownloadWorker.KEY_SOURCE to source,
+            DownloadWorker.KEY_TITLE to title.ifBlank { "AH Downloader" },
+            DownloadWorker.KEY_OUTPUT to destination.toString(),
+            DownloadWorker.KEY_KIND to kind.name,
+            DownloadWorker.KEY_QUALITY to quality
+        ))
+        .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+        .addTag("ytd-download")
+        .build()
+
+private fun retryWork(wm: WorkManager, info: WorkInfo) {
+    val data = info.outputData
+    val source = data.getString(DownloadWorker.KEY_SOURCE)
+    val title = data.getString(DownloadWorker.KEY_TITLE)
+    val output = data.getString(DownloadWorker.KEY_OUTPUT)
+    val kind = data.getString(DownloadWorker.KEY_KIND)
+    val quality = data.getString(DownloadWorker.KEY_QUALITY)
+    if (source.isNullOrBlank() || output.isNullOrBlank()) return
+    val request = buildDownloadRequest(
+        source,
+        title ?: "Download",
+        Uri.parse(output),
+        if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO,
+        quality ?: "best"
+    )
+    wm.enqueueUniqueWork("download-${request.id}", ExistingWorkPolicy.KEEP, request)
 }
 
 @Composable
