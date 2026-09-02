@@ -11,34 +11,21 @@ import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.IOException
 
-class DownloadWorker(
-    appContext: Context,
-    params: WorkerParameters
-) : CoroutineWorker(appContext, params) {
+class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val source = inputData.getString(KEY_SOURCE) ?: return Result.failure()
         val title = inputData.getString(KEY_TITLE) ?: "Download"
         val output = inputData.getString(KEY_OUTPUT) ?: return Result.failure()
         val kind = inputData.getString(KEY_KIND).orEmpty()
-        val id = inputData.getString(KEY_ID) ?: id.toString()
-
+        val requestId = inputData.getString(KEY_ID) ?: id.toString()
         createChannel()
-        setForeground(createForegroundInfo(id, title, 0))
-
-        val request = DownloadRequest(
-            id = id,
-            sourceUrl = source,
-            title = title,
-            kind = if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO,
-            quality = inputData.getString(KEY_QUALITY) ?: "best",
-            outputUri = output
-        )
-
+        setForeground(createForegroundInfo(requestId, title, 0))
+        val request = DownloadRequest(requestId, source, title, if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO, inputData.getString(KEY_QUALITY) ?: "best", outputUri = output)
         return try {
             val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
                 val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
                 setProgress(workDataOf("bytes" to done, "total" to total, "percent" to percent))
-                setForeground(createForegroundInfo(id, title, percent))
+                setForeground(createForegroundInfo(requestId, title, percent))
             }
             setProgress(workDataOf("bytes" to result.bytesDownloaded, "total" to result.totalBytes, "percent" to 100))
             Result.success(workDataOf("outputUri" to output))
@@ -53,8 +40,8 @@ class DownloadWorker(
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = applicationContext.getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW))
+            applicationContext.getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(NotificationChannel(CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW))
         }
     }
 
