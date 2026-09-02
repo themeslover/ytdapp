@@ -1,16 +1,19 @@
 import os
 import secrets
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import quote
 
 import jwt
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-app = FastAPI(title="AH Downloader API", version="0.2.0")
+app = FastAPI(title="AH Downloader API", version="0.3.0")
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_urlsafe(32))
 
 
@@ -67,23 +70,25 @@ def safe_extract(url: str, *, flat: bool = False):
     return info
 
 
+def height_selector(quality: str) -> str:
+    requested = "".join(ch for ch in quality if ch.isdigit())
+    return f"[height<={requested}]" if requested else ""
+
+
 @app.get("/")
 def root():
-    return {
-        "service": "ah-downloader-api",
-        "status": "ok",
-        "docs": "/docs",
-        "health": "/health",
-    }
+    return {"service": "ah-downloader-api", "status": "ok", "docs": "/docs", "health": "/health"}
 
 
 @app.get("/health")
 def health():
     deno = shutil.which("deno")
+    ffmpeg = shutil.which("ffmpeg")
     return {
         "ok": True,
         "service": "ah-downloader-api",
         "youtube_js_runtime": "deno" if deno else None,
+        "ffmpeg": "available" if ffmpeg else None,
         "youtube_ready": bool(deno),
     }
 
@@ -106,19 +111,11 @@ def search(q: str, limit: int = 20):
     limit = max(1, min(limit, 50))
     info = safe_extract(f"ytsearch{limit}:{q}", flat=True)
     entries = info.get("entries") or []
-    return {
-        "items": [
-            {
-                "id": e.get("id"),
-                "title": e.get("title") or "Untitled",
-                "url": e.get("webpage_url") or e.get("url"),
-                "duration": e.get("duration"),
-                "thumbnail": e.get("thumbnail"),
-            }
-            for e in entries
-            if e.get("webpage_url") or e.get("url")
-        ]
-    }
+    return {"items": [{
+        "id": e.get("id"), "title": e.get("title") or "Untitled",
+        "url": e.get("webpage_url") or e.get("url"), "duration": e.get("duration"),
+        "thumbnail": e.get("thumbnail"),
+    } for e in entries if e.get("webpage_url") or e.get("url")]}
 
 
 @app.post("/playlist")
@@ -133,59 +130,104 @@ def playlist(req: PlaylistRequest):
         if not url:
             continue
         items.append({
-            "id": e.get("id"),
-            "title": e.get("title") or "Untitled",
-            "url": url,
-            "duration": e.get("duration"),
-            "thumbnail": e.get("thumbnail"),
+            "id": e.get("id"), "title": e.get("title") or "Untitled", "url": url,
+            "duration": e.get("duration"), "thumbnail": e.get("thumbnail"),
         })
-    return {
-        "type": "playlist",
-        "title": info.get("title") or "YouTube Playlist",
-        "count": len(items),
-        "items": items,
-    }
+    return {"type": "playlist", "title": info.get("title") or "YouTube Playlist", "count": len(items), "items": items}
 
 
 @app.post("/resolve")
 def resolve(req: ResolveRequest):
     info = safe_extract(str(req.url))
     if info.get("_type") == "playlist" or info.get("entries"):
-        return {
-            "type": "playlist",
-            "title": info.get("title"),
-            "count": len(info.get("entries") or []),
-            "webpage_url": info.get("webpage_url"),
-        }
+        return {"type": "playlist", "title": info.get("title"), "count": len(info.get("entries") or []), "webpage_url": info.get("webpage_url")}
     formats = []
     for f in info.get("formats") or []:
         if not f.get("url") or f.get("protocol") in {"m3u8_native", "m3u8"}:
             continue
         formats.append({
-            "format_id": f.get("format_id"),
-            "ext": f.get("ext"),
-            "height": f.get("height"),
-            "width": f.get("width"),
-            "fps": f.get("fps"),
-            "abr": f.get("abr"),
-            "vcodec": f.get("vcodec"),
-            "acodec": f.get("acodec"),
-            "filesize": f.get("filesize") or f.get("filesize_approx"),
-            "url": f.get("url"),
+            "format_id": f.get("format_id"), "ext": f.get("ext"), "height": f.get("height"),
+            "width": f.get("width"), "fps": f.get("fps"), "abr": f.get("abr"),
+            "vcodec": f.get("vcodec"), "acodec": f.get("acodec"),
+            "filesize": f.get("filesize") or f.get("filesize_approx"), "url": f.get("url"),
         })
-    return {
-        "type": "media",
-        "title": info.get("title") or "Download",
-        "duration": info.get("duration"),
-        "formats": formats,
+    return {"type": "media", "title": info.get("title") or "Download", "duration": info.get("duration"), "formats": formats}
+
+
+@app.get("/download")
+def download(url: HttpUrl, mode: str = "video", quality: str = "best"):
+    """Download and, when possible, merge separate video/audio streams server-side."""
+    source = str(url)
+    is_audio = mode.lower() == "audio"
+    height = height_selector(quality)
+    ffmpeg = shutil.which("ffmpeg")
+
+    if is_audio:
+        format_selector = "bestaudio/best"
+        postprocessors = []
+    elif ffmpeg:
+        format_selector = f"bestvideo{height}+bestaudio/best{height}/best"
+        postprocessors = [{"key": "FFmpegMerger"}]
+    else:
+        # Keep the app functional without ffmpeg; choose a progressive stream.
+        format_selector = f"best[ext=mp4]{height}/best{height}/best"
+        postprocessors = []
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="ahdl-"))
+    output_template = str(temp_dir / "%(title).180B.%(ext)s")
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "age_limit": 17,
+        "restrictfilenames": True,
+        "format": format_selector,
+        "outtmpl": output_template,
+        "postprocessors": postprocessors,
+        "merge_output_format": "mp4" if not is_audio else None,
+        "overwrites": True,
     }
+    opts = {k: v for k, v in opts.items() if v is not None}
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(source, download=True)
+            title = info.get("title") or "download"
+            requested = info.get("requested_downloads") or []
+            final_path = Path(ydl.prepare_filename(info))
+            if requested and not final_path.exists():
+                merged = final_path.with_suffix(".mp4")
+                if merged.exists():
+                    final_path = merged
+            if not final_path.exists():
+                candidates = [p for p in temp_dir.iterdir() if p.is_file()]
+                if not candidates:
+                    raise HTTPException(502, "Downloader produced no media file")
+                final_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    except DownloadError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        message = str(exc).strip().splitlines()[-1] if str(exc).strip() else "Download failed"
+        if "ffmpeg" in message.lower() and not ffmpeg:
+            message += " Install FFmpeg on the server for high-quality video merging."
+        raise HTTPException(502, message) from exc
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise HTTPException(502, f"Download failed: {exc}") from exc
+
+    suffix = final_path.suffix.lower()
+    media_type = "audio/mpeg" if suffix == ".mp3" else "audio/mp4" if suffix in {".m4a", ".mp4"} and is_audio else "video/mp4" if suffix == ".mp4" else "application/octet-stream"
+
+    def cleanup():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return FileResponse(final_path, media_type=media_type, filename=f"{title}{suffix}", background=None, headers={"X-AH-Download": "complete"})
 
 
 @app.post("/upload")
-async def upload(
-    file: Annotated[UploadFile, File()],
-    authorization: str | None = Header(default=None),
-):
+async def upload(file: Annotated[UploadFile, File()], authorization: str | None = Header(default=None)):
     user = require_user(authorization)
     upload_root = Path(os.environ.get("UPLOAD_DIR", "./uploads")) / user
     upload_root.mkdir(parents=True, exist_ok=True)
