@@ -5,7 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
-import com.yausername.youtubedl_android.FFmpeg
+import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.json.JSONObject
@@ -49,25 +49,20 @@ object LocalMediaEngine {
         request.addOption("--skip-download")
         request.addOption("--ignore-errors")
         val response = YoutubeDL.getInstance().execute(request, null, true, null)
-        return response.out.lineSequence()
-            .mapNotNull(::parseSearchItem)
-            .take(safeLimit)
-            .toList()
+        return response.out.lineSequence().mapNotNull(::parseSearchItem).take(safeLimit).toList()
     }
 
     fun playlist(context: Context, playlistUrl: String, limit: Int = MAX_PLAYLIST): List<ApiClient.PlaylistItem> {
         ensureInitialized(context)
+        val safeLimit = limit.coerceIn(1, MAX_PLAYLIST)
         val request = YoutubeDLRequest(playlistUrl.trim())
         request.addOption("--flat-playlist")
         request.addOption("--dump-json")
         request.addOption("--skip-download")
         request.addOption("--ignore-errors")
-        request.addOption("--playlist-end", limit.coerceIn(1, MAX_PLAYLIST).toString())
+        request.addOption("--playlist-end", safeLimit.toString())
         val response = YoutubeDL.getInstance().execute(request, null, true, null)
-        return response.out.lineSequence()
-            .mapNotNull(::parsePlaylistItem)
-            .take(limit.coerceIn(1, MAX_PLAYLIST))
-            .toList()
+        return response.out.lineSequence().mapNotNull(::parsePlaylistItem).take(safeLimit).toList()
     }
 
     fun resolve(mediaUrl: String, kind: String, quality: String): ApiClient.Format {
@@ -138,17 +133,14 @@ object LocalMediaEngine {
 
     private fun videoFormat(quality: String): String {
         val height = quality.filter(Char::isDigit).toIntOrNull()
-        return if (height == null) {
-            "bv*+ba/b"
-        } else {
-            "bv*[height<=${height}]+ba/b[height<=${height}]"
-        }
+        return if (height == null) "bv*+ba/b" else "bv*[height<=${height}]+ba/b[height<=${height}]"
     }
 
     private fun copyToDestination(context: Context, source: File, destination: Uri) {
         when (destination.scheme?.lowercase()) {
             "file" -> {
                 val path = destination.path ?: throw IOException("Invalid file destination")
+                File(path).parentFile?.mkdirs()
                 FileOutputStream(File(path)).use { out -> source.inputStream().use { it.copyTo(out) } }
             }
             "content" -> {
@@ -163,12 +155,9 @@ object LocalMediaEngine {
     private fun publishDestination(context: Context, uri: Uri) {
         if (Build.VERSION.SDK_INT >= 29 && uri.scheme == "content") {
             runCatching {
-                context.contentResolver.update(
-                    uri,
-                    ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) },
-                    null,
-                    null
-                )
+                context.contentResolver.update(uri, ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }, null, null)
             }
         }
     }
