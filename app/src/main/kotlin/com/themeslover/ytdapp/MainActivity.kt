@@ -59,6 +59,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
@@ -133,7 +134,7 @@ class MainActivity : ComponentActivity() {
 
         fun saveApi() {
             apiUrl = apiUrl.trim().removeSuffix("/")
-            prefs.edit().putString("api_url", apiUrl).apply()
+            prefs.edit { putString("api_url", apiUrl) }
         }
 
         fun enqueue(url: String, title: String, extension: String?) {
@@ -149,7 +150,7 @@ class MainActivity : ComponentActivity() {
         }
 
         fun retry(info: WorkInfo) {
-            val data = info.inputData
+            val data = info.getInputData()
             val source = data.getString(DownloadWorker.KEY_SOURCE).orEmpty()
             if (source.isBlank()) { status = "This download cannot be retried"; return }
             val id = UUID.randomUUID().toString()
@@ -256,7 +257,7 @@ class MainActivity : ComponentActivity() {
         Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Download Manager", style = MaterialTheme.typography.headlineSmall); Text("$active active • $completed completed • $failed failed")
             OutlinedTextField(playlistUrl, onPlaylist, Modifier.fillMaxWidth(), label = { Text("YouTube Playlist URL") }, singleLine = true)
-            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist") }
+            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist") }
             AssistChip(onClick = {}, label = { Text(status) })
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(works, key = { it.id }) { info -> DownloadWorkCard(info, onCancel, onRetry, onRemove) } }
         }
@@ -265,19 +266,20 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun DownloadWorkCard(info: WorkInfo, onCancel: (WorkInfo) -> Unit, onRetry: (WorkInfo) -> Unit, onRemove: (WorkInfo) -> Unit) {
         val percent = info.progress.getInt("percent", 0).coerceIn(0, 100)
-        val title = info.inputData.getString(DownloadWorker.KEY_TITLE) ?: "Download"
-        val kind = info.inputData.getString(DownloadWorker.KEY_KIND) ?: "VIDEO"
+        val data = info.getInputData()
+        val title = data.getString(DownloadWorker.KEY_TITLE) ?: "Download"
+        val kind = data.getString(DownloadWorker.KEY_KIND) ?: "VIDEO"
         val error = info.outputData.getString("error")
-        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(kind, style = MaterialTheme.typography.bodySmall); when (info.state) { WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> { Text(if (percent > 0) "Downloading $percent%" else "Queued"); androidx.compose.material3.LinearProgressIndicator(progress = { percent / 100f }, Modifier.fillMaxWidth()); OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") } }; WorkInfo.State.SUCCEEDED -> { Text("Completed", color = MaterialTheme.colorScheme.primary); OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } }; WorkInfo.State.FAILED -> { Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Retry") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.CANCELLED -> { Text("Cancelled"); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Resume") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.BLOCKED -> Text("Waiting") } } }
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(kind, style = MaterialTheme.typography.bodySmall); when (info.state) { WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> { Text(if (percent > 0) "Downloading $percent%" else "Queued"); androidx.compose.material3.LinearProgressIndicator(progress = { percent / 100f }, modifier = Modifier.fillMaxWidth()); OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") } }; WorkInfo.State.SUCCEEDED -> { Text("Completed", color = MaterialTheme.colorScheme.primary); OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } }; WorkInfo.State.FAILED -> { Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Retry") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.CANCELLED -> { Text("Cancelled"); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Resume") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.BLOCKED -> Text("Waiting") } } }
     }
 
     @Composable
-    private fun SettingsScreen(apiUrl: String, onApi: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Settings", style = MaterialTheme.typography.headlineSmall); OutlinedTextField(apiUrl, onApi, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true); Button(onClick = onSave, Modifier.fillMaxWidth()) { Text("Save server") }; Text("Emulator: http://10.0.2.2:8000", style = MaterialTheme.typography.bodySmall); Text(status, style = MaterialTheme.typography.bodySmall) } }
+    private fun SettingsScreen(apiUrl: String, onApi: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Settings", style = MaterialTheme.typography.headlineSmall); OutlinedTextField(apiUrl, onApi, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true); Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save server") }; Text("Emulator: http://10.0.2.2:8000", style = MaterialTheme.typography.bodySmall); Text(status, style = MaterialTheme.typography.bodySmall) } }
 
     @Composable
     private fun PlayerScreen(videoId: String, title: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis); Card(Modifier.fillMaxWidth().height(230.dp)) { androidx.compose.ui.viewinterop.AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx -> WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false; loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0") } }) }; Text("Uses YouTube's embedded player. Some videos may disable embedding.", style = MaterialTheme.typography.bodySmall) } }
 
     private fun extractVideoId(url: String): String? = runCatching { val uri = Uri.parse(url); when { uri.host.equals("youtu.be", true) -> uri.pathSegments.firstOrNull(); uri.getQueryParameter("v") != null -> uri.getQueryParameter("v"); uri.pathSegments.firstOrNull() == "shorts" -> uri.pathSegments.getOrNull(1); uri.pathSegments.firstOrNull() == "embed" -> uri.pathSegments.getOrNull(1); else -> null } }.getOrNull()?.takeIf { it.length in 8..20 }
 
-    private fun formatDuration(seconds: Long): String { val s = seconds.coerceAtLeast(0); val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60; return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec) }
+    private fun formatDuration(seconds: Int): String { val h = seconds / 3600; val m = (seconds % 3600) / 60; val s = seconds % 60; return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s) }
 }
