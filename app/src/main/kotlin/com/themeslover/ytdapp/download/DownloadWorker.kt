@@ -23,40 +23,20 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         val kind = inputData.getString(KEY_KIND).orEmpty()
         val quality = inputData.getString(KEY_QUALITY) ?: "best"
         val requestId = inputData.getString(KEY_ID) ?: id.toString()
-
         createChannel()
         setForeground(createForegroundInfo(requestId, title, 0))
-
         fun progressData(bytes: Long, total: Long, percent: Int, message: String = "") = workDataOf(
-            "bytes" to bytes,
-            "total" to total,
-            "percent" to percent,
-            "attempt" to runAttemptCount,
-            "message" to message,
-            KEY_SOURCE to source,
-            KEY_TITLE to title,
-            KEY_OUTPUT to output,
-            KEY_KIND to kind,
-            KEY_QUALITY to quality
+            "bytes" to bytes, "total" to total, "percent" to percent, "attempt" to runAttemptCount,
+            "message" to message, KEY_SOURCE to source, KEY_TITLE to title, KEY_OUTPUT to output,
+            KEY_KIND to kind, KEY_QUALITY to quality
         )
-
         setProgress(progressData(0L, 0L, 0, "Starting"))
-
         return try {
             withContext(Dispatchers.IO) {
-                LocalMediaEngine.download(
-                    context = applicationContext,
-                    sourceUrl = source,
-                    title = title,
-                    outputUri = output,
-                    kind = kind,
-                    quality = quality,
-                    processId = requestId,
-                    onProgress = { percent, message ->
-                        setProgress(progressData(0L, 0L, percent, message))
-                        setForeground(createForegroundInfo(requestId, title, percent))
-                    }
-                )
+                LocalMediaEngine.download(applicationContext, source, title, output, kind, quality, requestId) { percent, message ->
+                    setProgress(progressData(0L, 0L, percent, message))
+                    setForeground(createForegroundInfo(requestId, title, percent))
+                }
             }
             setProgress(progressData(0L, 0L, 100, "Complete"))
             Result.success(workDataOf("outputUri" to output, KEY_TITLE to title))
@@ -64,23 +44,16 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
             LocalMediaEngine.cancel(requestId)
             throw cancelled
         } catch (localError: Throwable) {
-            // Keep the old LAN/cloud backend as a compatibility fallback. A user
-            // normally never needs it, but an installed server can still handle
-            // sources which the bundled runtime cannot process on a given device.
             try {
                 val request = DownloadRequest(
-                    requestId,
-                    source,
-                    title,
+                    requestId, source, title,
                     if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO,
-                    quality,
-                    outputUri = output,
-                    attempt = runAttemptCount
+                    quality, outputUri = output, attempt = runAttemptCount
                 )
                 withContext(Dispatchers.IO) {
                     val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
                         val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
-                        setProgress(progressData(done, total, percent, "Downloading"))
+                        setProgress(progressData(done, total, percent, "Server fallback"))
                         setForeground(createForegroundInfo(requestId, title, percent))
                     }
                     setProgress(progressData(result.bytesDownloaded, result.totalBytes, 100, "Complete"))
@@ -88,60 +61,34 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
                 Result.success(workDataOf("outputUri" to output, KEY_TITLE to title))
             } catch (fallbackError: Throwable) {
                 val error = fallbackError.message ?: localError.message ?: "Download failed"
-                if (isRetryable(error) && runAttemptCount < MAX_RETRIES) {
-                    Result.retry()
-                } else {
-                    Result.failure(
-                        workDataOf(
-                            "error" to error,
-                            "attempts" to (runAttemptCount + 1),
-                            KEY_SOURCE to source,
-                            KEY_TITLE to title,
-                            KEY_OUTPUT to output,
-                            KEY_KIND to kind,
-                            KEY_QUALITY to quality
-                        )
-                    )
-                }
+                if (isRetryable(error) && runAttemptCount < MAX_RETRIES) Result.retry()
+                else Result.failure(workDataOf(
+                    "error" to error, "attempts" to (runAttemptCount + 1), KEY_SOURCE to source,
+                    KEY_TITLE to title, KEY_OUTPUT to output, KEY_KIND to kind, KEY_QUALITY to quality
+                ))
             }
         }
     }
 
     private fun isRetryable(message: String): Boolean {
         val text = message.lowercase()
-        return text.contains("temporary") ||
-            text.contains("timeout") ||
-            text.contains("timed out") ||
-            text.contains("connection") ||
-            text.contains("reset") ||
-            text.contains("429") ||
-            text.contains("500") ||
-            text.contains("502") ||
-            text.contains("503") ||
-            text.contains("504") ||
-            text.contains("network")
+        return listOf("temporary", "timeout", "timed out", "connection", "reset", "429", "500", "502", "503", "504", "network").any(text::contains)
     }
-
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            applicationContext.getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(
-                    NotificationChannel(CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW)
-                )
+            applicationContext.getSystemService(NotificationManager::class.java).createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Downloads", NotificationManager.IMPORTANCE_LOW)
+            )
         }
     }
-
     private fun createForegroundInfo(id: String, title: String, progress: Int): ForegroundInfo {
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(if (progress > 0) "Downloading $progress%" else "Starting download")
-            .setOngoing(true)
-            .setProgress(100, progress, progress == 0)
-            .build()
+            .setOngoing(true).setProgress(100, progress, progress == 0).build()
         return ForegroundInfo(id.hashCode(), notification)
     }
-
     companion object {
         const val KEY_ID = "id"
         const val KEY_SOURCE = "source"
