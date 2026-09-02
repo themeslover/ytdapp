@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
@@ -84,27 +83,17 @@ class MainActivity : ComponentActivity() {
 
     private fun requestUsefulPermissions() {
         val permissions = buildList {
-            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-            if (Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
+            if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
+            if (Build.VERSION.SDK_INT <= 28 && ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
         if (permissions.isNotEmpty()) requestPermissions(permissions.toTypedArray(), 1001)
     }
 
     private fun createDestination(title: String, kind: MediaKind, extension: String?): Uri? {
         val safe = title.replace(Regex("[^A-Za-z0-9._-]"), "_").take(90).ifBlank { "download" }
-        val ext = extension?.lowercase()?.let { if (it.startsWith(".")) it else ".${it}" }
-            ?: if (kind == MediaKind.AUDIO) ".m4a" else ".mp4"
+        val ext = extension?.lowercase()?.let { if (it.startsWith(".")) it else ".${it}" } ?: if (kind == MediaKind.AUDIO) ".m4a" else ".mp4"
         val display = if (safe.endsWith(ext, true)) safe else safe + ext
-        val mime = when (ext) {
-            ".m4a" -> "audio/mp4"
-            ".webm" -> if (kind == MediaKind.AUDIO) "audio/webm" else "video/webm"
-            ".mp3" -> "audio/mpeg"
-            else -> if (kind == MediaKind.AUDIO) "audio/*" else "video/mp4"
-        }
+        val mime = when (ext) { ".m4a" -> "audio/mp4"; ".webm" -> if (kind == MediaKind.AUDIO) "audio/webm" else "video/webm"; ".mp3" -> "audio/mpeg"; else -> if (kind == MediaKind.AUDIO) "audio/*" else "video/mp4" }
         return if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, display)
@@ -152,14 +141,7 @@ class MainActivity : ComponentActivity() {
             if (output == null) { status = "Could not create Downloads destination"; return }
             val id = UUID.randomUUID().toString()
             val request = OneTimeWorkRequestBuilder<DownloadWorker>()
-                .setInputData(workDataOf(
-                    DownloadWorker.KEY_ID to id,
-                    DownloadWorker.KEY_SOURCE to url,
-                    DownloadWorker.KEY_TITLE to title,
-                    DownloadWorker.KEY_OUTPUT to output.toString(),
-                    DownloadWorker.KEY_KIND to kind.name,
-                    DownloadWorker.KEY_QUALITY to quality
-                ))
+                .setInputData(workDataOf(DownloadWorker.KEY_ID to id, DownloadWorker.KEY_SOURCE to url, DownloadWorker.KEY_TITLE to title, DownloadWorker.KEY_OUTPUT to output.toString(), DownloadWorker.KEY_KIND to kind.name, DownloadWorker.KEY_QUALITY to quality))
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .addTag("ytd-download")
                 .build()
@@ -169,11 +151,7 @@ class MainActivity : ComponentActivity() {
         fun retry(info: WorkInfo) {
             val data = info.inputData
             val source = data.getString(DownloadWorker.KEY_SOURCE).orEmpty()
-            val output = data.getString(DownloadWorker.KEY_OUTPUT).orEmpty()
-            if (source.isBlank() || output.isBlank()) {
-                status = "This download cannot be retried"
-                return
-            }
+            if (source.isBlank()) { status = "This download cannot be retried"; return }
             val id = UUID.randomUUID().toString()
             val request = OneTimeWorkRequestBuilder<DownloadWorker>()
                 .setInputData(data.toBuilder().putString(DownloadWorker.KEY_ID, id).build())
@@ -185,20 +163,18 @@ class MainActivity : ComponentActivity() {
         }
 
         fun download(url: String, title: String = "Download") {
-            saveApi()
-            status = "Preparing download..."
+            if (url.isBlank()) return
+            saveApi(); status = "Preparing download..."
             scope.launch {
-                runCatching { withContext(Dispatchers.IO) { api.resolve(apiUrl, url, kind.name, quality) } }
+                runCatching { withContext(Dispatchers.IO) { api.resolve(apiUrl, url.trim(), kind.name, quality) } }
                     .onSuccess { f -> enqueue(f.url, title, f.ext); status = "Queued: $title"; tab = 2 }
                     .onFailure { status = "Download failed: ${it.message ?: "server error"}" }
             }
         }
 
         fun search() {
-            saveApi()
             if (query.isBlank()) return
-            searching = true
-            status = "Searching YouTube..."
+            saveApi(); searching = true; status = "Searching YouTube..."
             scope.launch {
                 runCatching { withContext(Dispatchers.IO) { api.search(apiUrl, query.trim()) } }
                     .onSuccess { results = it; status = if (it.isEmpty()) "No results found" else "Found ${it.size} videos" }
@@ -208,16 +184,13 @@ class MainActivity : ComponentActivity() {
         }
 
         fun playlist() {
-            saveApi()
             if (playlistUrl.isBlank()) return
-            playlistLoading = true
-            status = "Reading playlist..."
+            saveApi(); playlistLoading = true; status = "Reading playlist..."
             scope.launch {
                 runCatching { withContext(Dispatchers.IO) { api.playlist(apiUrl, playlistUrl.trim()) } }
                     .onSuccess { items ->
-                        val limited = items.take(200)
-                        var queued = 0
-                        limited.forEach { item ->
+                        val limited = items.take(200); var queued = 0
+                        for (item in limited) {
                             runCatching { withContext(Dispatchers.IO) { api.resolve(apiUrl, item.url, kind.name, quality) } }
                                 .onSuccess { f -> enqueue(f.url, item.title, f.ext); queued++ }
                         }
@@ -230,25 +203,13 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Download, null, Modifier.size(28.dp)); Spacer(Modifier.size(8.dp)); Text("AH Downloader") } },
-                    navigationIcon = { if (playingId != null) IconButton(onClick = { playingId = null }) { Icon(Icons.Default.ArrowBack, "Back") } }
-                )
-            },
-            bottomBar = {
-                NavigationBar {
-                    listOf("Home" to Icons.Default.Home, "Search" to Icons.Default.Search, "Downloads" to Icons.Default.Download, "Settings" to Icons.Default.Settings).forEachIndexed { i, item ->
-                        NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(item.second, item.first) }, label = { Text(item.first) })
-                    }
-                }
-            }
+            topBar = { TopAppBar(title = { Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Default.Download, null, Modifier.size(28.dp)); Spacer(Modifier.size(8.dp)); Text("AH Downloader") } }, navigationIcon = { if (playingId != null) IconButton(onClick = { playingId = null }) { Icon(Icons.Default.ArrowBack, "Back") } }) },
+            bottomBar = { NavigationBar { listOf("Home" to Icons.Default.Home, "Search" to Icons.Default.Search, "Downloads" to Icons.Default.Download, "Settings" to Icons.Default.Settings).forEachIndexed { i, item -> NavigationBarItem(selected = tab == i, onClick = { tab = i }, icon = { Icon(item.second, item.first) }, label = { Text(item.first) }) } } }
         ) { padding ->
-            if (playingId != null) PlayerScreen(playingId!!, playingTitle, Modifier.padding(padding))
-            else when (tab) {
+            if (playingId != null) PlayerScreen(playingId!!, playingTitle, Modifier.padding(padding)) else when (tab) {
                 0 -> HomeScreen(query, { query = it }, searching, { search() }, results, { item -> playingId = extractVideoId(item.url); playingTitle = item.title }, { item -> download(item.url, item.title) }, sourceUrl, { sourceUrl = it }, kind, { kind = it }, quality, { quality = it }, status, { download(sourceUrl) }, Modifier.padding(padding))
                 1 -> SearchScreen(query, { query = it }, searching, { search() }, results, { item -> playingId = extractVideoId(item.url); playingTitle = item.title }, { item -> download(item.url, item.title) }, Modifier.padding(padding))
-                2 -> DownloadsScreen(works, playlistUrl, { playlistUrl = it }, playlistLoading, { playlist() }, status, { info -> workManager.cancelWorkById(info.id); status = "Download cancelled" }, { info -> retry(info) }, { workManager.cancelWorkById(info.id); status = "Download removed" }, Modifier.padding(padding))
+                2 -> DownloadsScreen(works, playlistUrl, { playlistUrl = it }, playlistLoading, { playlist() }, status, { info -> workManager.cancelWorkById(info.id); status = "Download cancelled" }, { info -> retry(info) }, { info -> workManager.cancelWorkById(info.id); status = "Download removed" }, Modifier.padding(padding))
                 else -> SettingsScreen(apiUrl, { apiUrl = it }, { saveApi() }, status, Modifier.padding(padding))
             }
         }
@@ -257,181 +218,66 @@ class MainActivity : ComponentActivity() {
     @Composable
     private fun HomeScreen(query: String, onQuery: (String) -> Unit, searching: Boolean, onSearch: () -> Unit, results: List<ApiClient.SearchItem>, onPlay: (ApiClient.SearchItem) -> Unit, onDownload: (ApiClient.SearchItem) -> Unit, source: String, onSource: (String) -> Unit, kind: MediaKind, onKind: (MediaKind) -> Unit, quality: String, onQuality: (String) -> Unit, status: String, onDownloadUrl: () -> Unit, modifier: Modifier) {
         LazyColumn(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { Text("Search, watch and download", style = MaterialTheme.typography.headlineSmall); Text("YouTube search is built in. Play results or download individual videos.") }
+            item { Text("Search, watch and download", style = MaterialTheme.typography.headlineSmall); Text("Search YouTube or paste a media URL.") }
             item { SearchBar(query, onQuery, searching, onSearch) }
             items(results.take(8), key = { it.url }) { ResultCard(it, onPlay, onDownload) }
-            item {
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("Download a YouTube link", style = MaterialTheme.typography.titleMedium)
-                    OutlinedTextField(source, onSource, Modifier.fillMaxWidth(), label = { Text("YouTube or direct media URL") }, singleLine = true)
-                    OptionButtons(kind, onKind, quality, onQuality)
-                    Button(onClick = onDownloadUrl, enabled = source.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text("Download") }
-                } }
-            }
+            item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text("Download a link", style = MaterialTheme.typography.titleMedium); OutlinedTextField(source, onSource, Modifier.fillMaxWidth(), label = { Text("YouTube or direct media URL") }, singleLine = true); OptionButtons(kind, onKind, quality, onQuality); Button(onClick = onDownloadUrl, enabled = source.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text("Download") } } } }
             item { AssistChip(onClick = {}, label = { Text(status) }) }
         }
     }
 
     @Composable
     private fun SearchScreen(query: String, onQuery: (String) -> Unit, searching: Boolean, onSearch: () -> Unit, results: List<ApiClient.SearchItem>, onPlay: (ApiClient.SearchItem) -> Unit, onDownload: (ApiClient.SearchItem) -> Unit, modifier: Modifier) {
-        Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("YouTube Search", style = MaterialTheme.typography.headlineSmall)
-            SearchBar(query, onQuery, searching, onSearch)
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(results, key = { it.url }) { ResultCard(it, onPlay, onDownload) } }
-        }
+        Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("YouTube Search", style = MaterialTheme.typography.headlineSmall); SearchBar(query, onQuery, searching, onSearch); LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(results, key = { it.url }) { ResultCard(it, onPlay, onDownload) } } }
     }
 
     @Composable
     private fun SearchBar(query: String, onQuery: (String) -> Unit, searching: Boolean, onSearch: () -> Unit) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(query, onQuery, Modifier.weight(1f), label = { Text("Search YouTube") }, singleLine = true)
-            Button(onClick = onSearch, enabled = query.isNotBlank() && !searching) { if (searching) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Search, "Search") }
-        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(query, onQuery, Modifier.weight(1f), label = { Text("Search YouTube") }, singleLine = true); Button(onClick = onSearch, enabled = query.isNotBlank() && !searching) { if (searching) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Search, "Search") } }
     }
 
     @Composable
     private fun ResultCard(item: ApiClient.SearchItem, onPlay: (ApiClient.SearchItem) -> Unit, onDownload: (ApiClient.SearchItem) -> Unit) {
-        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            item.duration?.let { Text(formatDuration(it), style = MaterialTheme.typography.bodySmall) }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { onPlay(item) }) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.size(4.dp)); Text("Play") }
-                Button(onClick = { onDownload(item) }) { Icon(Icons.Default.Download, null); Spacer(Modifier.size(4.dp)); Text("Download") }
-            }
-        } }
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text(item.title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis); item.duration?.let { Text(formatDuration(it), style = MaterialTheme.typography.bodySmall) }; Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { onPlay(item) }) { Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.size(4.dp)); Text("Play") }; Button(onClick = { onDownload(item) }) { Icon(Icons.Default.Download, null); Spacer(Modifier.size(4.dp)); Text("Download") } } } }
     }
 
     @Composable
     private fun OptionButtons(kind: MediaKind, onKind: (MediaKind) -> Unit, quality: String, onQuality: (String) -> Unit) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { onKind(if (kind == MediaKind.VIDEO) MediaKind.AUDIO else MediaKind.VIDEO) }, modifier = Modifier.weight(1f)) { Text(if (kind == MediaKind.VIDEO) "VIDEO" else "AUDIO") }
-            OutlinedButton(onClick = { onQuality(nextQuality(quality)) }, modifier = Modifier.weight(1f)) { Text("Quality: $quality") }
-        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) { OutlinedButton(onClick = { onKind(if (kind == MediaKind.VIDEO) MediaKind.AUDIO else MediaKind.VIDEO) }, Modifier.weight(1f)) { Text(kind.name) }; OutlinedButton(onClick = { onQuality(nextQuality(quality)) }, Modifier.weight(1f)) { Text("Quality: $quality") } }
     }
 
     private fun nextQuality(value: String): String = when (value) { "best" -> "1080"; "1080" -> "720"; "720" -> "480"; "480" -> "360"; else -> "best" }
 
     @Composable
-    private fun DownloadsScreen(
-        works: List<WorkInfo>,
-        playlistUrl: String,
-        onPlaylist: (String) -> Unit,
-        loading: Boolean,
-        onDownload: () -> Unit,
-        status: String,
-        onCancel: (WorkInfo) -> Unit,
-        onRetry: (WorkInfo) -> Unit,
-        onRemove: (WorkInfo) -> Unit,
-        modifier: Modifier
-    ) {
+    private fun DownloadsScreen(works: List<WorkInfo>, playlistUrl: String, onPlaylist: (String) -> Unit, loading: Boolean, onDownload: () -> Unit, status: String, onCancel: (WorkInfo) -> Unit, onRetry: (WorkInfo) -> Unit, onRemove: (WorkInfo) -> Unit, modifier: Modifier) {
         val active = works.count { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED }
         val completed = works.count { it.state == WorkInfo.State.SUCCEEDED }
         val failed = works.count { it.state == WorkInfo.State.FAILED }
-        val cancelled = works.count { it.state == WorkInfo.State.CANCELLED }
-
         Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Download Manager", style = MaterialTheme.typography.headlineSmall)
-            Text("$active active • $completed completed • $failed failed • $cancelled cancelled", style = MaterialTheme.typography.bodyMedium)
+            Text("Download Manager", style = MaterialTheme.typography.headlineSmall); Text("$active active • $completed completed • $failed failed")
             OutlinedTextField(playlistUrl, onPlaylist, Modifier.fillMaxWidth(), label = { Text("YouTube Playlist URL") }, singleLine = true)
-            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) {
-                if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null)
-                Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist")
-            }
+            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist") }
             AssistChip(onClick = {}, label = { Text(status) })
-            Text("Queue", style = MaterialTheme.typography.titleLarge)
-            if (works.isEmpty()) {
-                Card(Modifier.fillMaxWidth()) { Text("No downloads yet. Start a download from Home or Search.", Modifier.padding(16.dp)) }
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    itemsIndexed(works, key = { _, info -> info.id }) { _, info ->
-                        DownloadWorkCard(info, onCancel, onRetry, onRemove)
-                    }
-                }
-            }
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(works, key = { it.id }) { info -> DownloadWorkCard(info, onCancel, onRetry, onRemove) } }
         }
     }
 
     @Composable
     private fun DownloadWorkCard(info: WorkInfo, onCancel: (WorkInfo) -> Unit, onRetry: (WorkInfo) -> Unit, onRemove: (WorkInfo) -> Unit) {
-        val p = info.progress.getInt("percent", 0).coerceIn(0, 100)
+        val percent = info.progress.getInt("percent", 0).coerceIn(0, 100)
         val title = info.inputData.getString(DownloadWorker.KEY_TITLE) ?: "Download"
         val kind = info.inputData.getString(DownloadWorker.KEY_KIND) ?: "VIDEO"
-        val quality = info.inputData.getString(DownloadWorker.KEY_QUALITY) ?: "best"
         val error = info.outputData.getString("error")
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text("$kind • $quality", style = MaterialTheme.typography.bodySmall)
-                when (info.state) {
-                    WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> {
-                        if (p > 0) {
-                            Text("Downloading $p%")
-                            androidx.compose.material3.LinearProgressIndicator(progress = { p / 100f }, modifier = Modifier.fillMaxWidth())
-                        } else {
-                            Text(if (info.state == WorkInfo.State.RUNNING) "Starting download..." else "Queued")
-                            androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                        }
-                        OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") }
-                    }
-                    WorkInfo.State.SUCCEEDED -> {
-                        Text("Completed", color = MaterialTheme.colorScheme.primary)
-                        OutlinedButton(onClick = { onRemove(info) }) { Text("Remove from queue") }
-                    }
-                    WorkInfo.State.FAILED -> {
-                        Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { onRetry(info) }) { Text("Retry") }
-                            OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") }
-                        }
-                    }
-                    WorkInfo.State.CANCELLED -> {
-                        Text("Cancelled")
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(onClick = { onRetry(info) }) { Text("Resume") }
-                            OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") }
-                        }
-                    }
-                    WorkInfo.State.BLOCKED -> Text("Waiting for another queued task")
-                }
-            }
-        }
+        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(kind, style = MaterialTheme.typography.bodySmall); when (info.state) { WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> { Text(if (percent > 0) "Downloading $percent%" else "Queued"); androidx.compose.material3.LinearProgressIndicator(progress = { percent / 100f }, Modifier.fillMaxWidth()); OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") } }; WorkInfo.State.SUCCEEDED -> { Text("Completed", color = MaterialTheme.colorScheme.primary); OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } }; WorkInfo.State.FAILED -> { Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Retry") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.CANCELLED -> { Text("Cancelled"); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Resume") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.BLOCKED -> Text("Waiting") } } }
     }
 
     @Composable
-    private fun SettingsScreen(apiUrl: String, onApi: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) {
-        Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Settings", style = MaterialTheme.typography.headlineSmall)
-            OutlinedTextField(apiUrl, onApi, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true)
-            Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save server") }
-            Text("Emulator default: http://10.0.2.2:8000", style = MaterialTheme.typography.bodySmall)
-            Text(status, style = MaterialTheme.typography.bodySmall)
-        }
-    }
+    private fun SettingsScreen(apiUrl: String, onApi: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Settings", style = MaterialTheme.typography.headlineSmall); OutlinedTextField(apiUrl, onApi, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true); Button(onClick = onSave, Modifier.fillMaxWidth()) { Text("Save server") }; Text("Emulator: http://10.0.2.2:8000", style = MaterialTheme.typography.bodySmall); Text(status, style = MaterialTheme.typography.bodySmall) } }
 
     @Composable
-    private fun PlayerScreen(videoId: String, title: String, modifier: Modifier) {
-        Column(modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Card(Modifier.fillMaxWidth().height(230.dp)) {
-                androidx.compose.ui.viewinterop.AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx -> WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false; loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0") } })
-            }
-            Text("Playback uses YouTube's embedded player. Some videos may disable embedding.", style = MaterialTheme.typography.bodySmall)
-        }
-    }
+    private fun PlayerScreen(videoId: String, title: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis); Card(Modifier.fillMaxWidth().height(230.dp)) { androidx.compose.ui.viewinterop.AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx -> WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false; loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0") } }) }; Text("Uses YouTube's embedded player. Some videos may disable embedding.", style = MaterialTheme.typography.bodySmall) } }
 
-    private fun extractVideoId(url: String): String? = runCatching {
-        val uri = Uri.parse(url)
-        when {
-            uri.host.equals("youtu.be", true) -> uri.pathSegments.firstOrNull()
-            uri.getQueryParameter("v") != null -> uri.getQueryParameter("v")
-            uri.pathSegments.firstOrNull() == "shorts" -> uri.pathSegments.getOrNull(1)
-            uri.pathSegments.firstOrNull() == "embed" -> uri.pathSegments.getOrNull(1)
-            else -> null
-        }
-    }.getOrNull()?.takeIf { it.length in 8..20 }
+    private fun extractVideoId(url: String): String? = runCatching { val uri = Uri.parse(url); when { uri.host.equals("youtu.be", true) -> uri.pathSegments.firstOrNull(); uri.getQueryParameter("v") != null -> uri.getQueryParameter("v"); uri.pathSegments.firstOrNull() == "shorts" -> uri.pathSegments.getOrNull(1); uri.pathSegments.firstOrNull() == "embed" -> uri.pathSegments.getOrNull(1); else -> null } }.getOrNull()?.takeIf { it.length in 8..20 }
 
-    private fun formatDuration(seconds: Long): String {
-        val s = seconds.coerceAtLeast(0); val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60
-        return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec)
-    }
+    private fun formatDuration(seconds: Long): String { val s = seconds.coerceAtLeast(0); val h = s / 3600; val m = (s % 3600) / 60; val sec = s % 60; return if (h > 0) "%d:%02d:%02d".format(h, m, sec) else "%d:%02d".format(m, sec) }
 }
