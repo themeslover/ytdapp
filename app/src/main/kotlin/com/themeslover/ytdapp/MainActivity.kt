@@ -64,6 +64,7 @@ import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.themeslover.ytdapp.download.DownloadWorker
@@ -165,6 +166,24 @@ class MainActivity : ComponentActivity() {
             workManager.enqueueUniqueWork("download-$id", ExistingWorkPolicy.KEEP, request)
         }
 
+        fun retry(info: WorkInfo) {
+            val data = info.inputData
+            val source = data.getString(DownloadWorker.KEY_SOURCE).orEmpty()
+            val output = data.getString(DownloadWorker.KEY_OUTPUT).orEmpty()
+            if (source.isBlank() || output.isBlank()) {
+                status = "This download cannot be retried"
+                return
+            }
+            val id = UUID.randomUUID().toString()
+            val request = OneTimeWorkRequestBuilder<DownloadWorker>()
+                .setInputData(data.toBuilder().putString(DownloadWorker.KEY_ID, id).build())
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .addTag("ytd-download")
+                .build()
+            workManager.enqueueUniqueWork("download-$id", ExistingWorkPolicy.KEEP, request)
+            status = "Retry queued"
+        }
+
         fun download(url: String, title: String = "Download") {
             saveApi()
             status = "Preparing download..."
@@ -229,7 +248,7 @@ class MainActivity : ComponentActivity() {
             else when (tab) {
                 0 -> HomeScreen(query, { query = it }, searching, { search() }, results, { item -> playingId = extractVideoId(item.url); playingTitle = item.title }, { item -> download(item.url, item.title) }, sourceUrl, { sourceUrl = it }, kind, { kind = it }, quality, { quality = it }, status, { download(sourceUrl) }, Modifier.padding(padding))
                 1 -> SearchScreen(query, { query = it }, searching, { search() }, results, { item -> playingId = extractVideoId(item.url); playingTitle = item.title }, { item -> download(item.url, item.title) }, Modifier.padding(padding))
-                2 -> DownloadsScreen(works, playlistUrl, { playlistUrl = it }, playlistLoading, { playlist() }, status, Modifier.padding(padding))
+                2 -> DownloadsScreen(works, playlistUrl, { playlistUrl = it }, playlistLoading, { playlist() }, status, { info -> workManager.cancelWorkById(info.id); status = "Download cancelled" }, { info -> retry(info) }, { workManager.cancelWorkById(info.id); status = "Download removed" }, Modifier.padding(padding))
                 else -> SettingsScreen(apiUrl, { apiUrl = it }, { saveApi() }, status, Modifier.padding(padding))
             }
         }
@@ -293,16 +312,88 @@ class MainActivity : ComponentActivity() {
     private fun nextQuality(value: String): String = when (value) { "best" -> "1080"; "1080" -> "720"; "720" -> "480"; "480" -> "360"; else -> "best" }
 
     @Composable
-    private fun DownloadsScreen(works: List<androidx.work.WorkInfo>, playlistUrl: String, onPlaylist: (String) -> Unit, loading: Boolean, onDownload: () -> Unit, status: String, modifier: Modifier) {
+    private fun DownloadsScreen(
+        works: List<WorkInfo>,
+        playlistUrl: String,
+        onPlaylist: (String) -> Unit,
+        loading: Boolean,
+        onDownload: () -> Unit,
+        status: String,
+        onCancel: (WorkInfo) -> Unit,
+        onRetry: (WorkInfo) -> Unit,
+        onRemove: (WorkInfo) -> Unit,
+        modifier: Modifier
+    ) {
+        val active = works.count { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED }
+        val completed = works.count { it.state == WorkInfo.State.SUCCEEDED }
+        val failed = works.count { it.state == WorkInfo.State.FAILED }
+        val cancelled = works.count { it.state == WorkInfo.State.CANCELLED }
+
         Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Downloads & Playlists", style = MaterialTheme.typography.headlineSmall)
+            Text("Download Manager", style = MaterialTheme.typography.headlineSmall)
+            Text("$active active • $completed completed • $failed failed • $cancelled cancelled", style = MaterialTheme.typography.bodyMedium)
             OutlinedTextField(playlistUrl, onPlaylist, Modifier.fillMaxWidth(), label = { Text("YouTube Playlist URL") }, singleLine = true)
-            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist") }
-            Text(status)
+            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) {
+                if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null)
+                Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist")
+            }
+            AssistChip(onClick = {}, label = { Text(status) })
             Text("Queue", style = MaterialTheme.typography.titleLarge)
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { itemsIndexed(works, key = { _, info -> info.id }) { _, info ->
-                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp)) { val p = info.progress.getInt("percent", 0); Text(info.state.name + if (p > 0) " • $p%" else ""); info.outputData.getString("error")?.let { Text(it, color = MaterialTheme.colorScheme.error) } } }
-            } }
+            if (works.isEmpty()) {
+                Card(Modifier.fillMaxWidth()) { Text("No downloads yet. Start a download from Home or Search.", Modifier.padding(16.dp)) }
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    itemsIndexed(works, key = { _, info -> info.id }) { _, info ->
+                        DownloadWorkCard(info, onCancel, onRetry, onRemove)
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun DownloadWorkCard(info: WorkInfo, onCancel: (WorkInfo) -> Unit, onRetry: (WorkInfo) -> Unit, onRemove: (WorkInfo) -> Unit) {
+        val p = info.progress.getInt("percent", 0).coerceIn(0, 100)
+        val title = info.inputData.getString(DownloadWorker.KEY_TITLE) ?: "Download"
+        val kind = info.inputData.getString(DownloadWorker.KEY_KIND) ?: "VIDEO"
+        val quality = info.inputData.getString(DownloadWorker.KEY_QUALITY) ?: "best"
+        val error = info.outputData.getString("error")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text("$kind • $quality", style = MaterialTheme.typography.bodySmall)
+                when (info.state) {
+                    WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> {
+                        if (p > 0) {
+                            Text("Downloading $p%")
+                            androidx.compose.material3.LinearProgressIndicator(progress = { p / 100f }, modifier = Modifier.fillMaxWidth())
+                        } else {
+                            Text(if (info.state == WorkInfo.State.RUNNING) "Starting download..." else "Queued")
+                            androidx.compose.material3.LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") }
+                    }
+                    WorkInfo.State.SUCCEEDED -> {
+                        Text("Completed", color = MaterialTheme.colorScheme.primary)
+                        OutlinedButton(onClick = { onRemove(info) }) { Text("Remove from queue") }
+                    }
+                    WorkInfo.State.FAILED -> {
+                        Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { onRetry(info) }) { Text("Retry") }
+                            OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") }
+                        }
+                    }
+                    WorkInfo.State.CANCELLED -> {
+                        Text("Cancelled")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { onRetry(info) }) { Text("Resume") }
+                            OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") }
+                        }
+                    }
+                    WorkInfo.State.BLOCKED -> Text("Waiting for another queued task")
+                }
+            }
         }
     }
 
