@@ -12,6 +12,7 @@ import androidx.work.workDataOf
 import com.themeslover.ytdapp.LocalMediaEngine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.io.IOException
 
@@ -34,8 +35,10 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         return try {
             withContext(Dispatchers.IO) {
                 LocalMediaEngine.download(applicationContext, source, title, output, kind, quality, requestId) { percent, message ->
-                    setProgress(progressData(0L, 0L, percent, message))
-                    setForeground(createForegroundInfo(requestId, title, percent))
+                    runBlocking {
+                        setProgress(progressData(0L, 0L, percent, message))
+                        setForeground(createForegroundInfo(requestId, title, percent))
+                    }
                 }
             }
             setProgress(progressData(0L, 0L, 100, "Complete"))
@@ -53,8 +56,10 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
                 withContext(Dispatchers.IO) {
                     val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
                         val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
-                        setProgress(progressData(done, total, percent, "Server fallback"))
-                        setForeground(createForegroundInfo(requestId, title, percent))
+                        runBlocking {
+                            setProgress(progressData(done, total, percent, "Server fallback"))
+                            setForeground(createForegroundInfo(requestId, title, percent))
+                        }
                     }
                     setProgress(progressData(result.bytesDownloaded, result.totalBytes, 100, "Complete"))
                 }
