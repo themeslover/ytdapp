@@ -1,7 +1,6 @@
 import os
 import secrets
-import subprocess
-import tempfile
+import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -9,8 +8,9 @@ import jwt
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, HttpUrl
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
-app = FastAPI(title="YTD App API", version="0.1.0")
+app = FastAPI(title="AH Downloader API", version="0.2.0")
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_urlsafe(32))
 
 
@@ -21,8 +21,12 @@ class LoginRequest(BaseModel):
 
 class ResolveRequest(BaseModel):
     url: HttpUrl
-    mode: str = "best"
+    mode: str = "video"
     quality: str = "best"
+
+
+class PlaylistRequest(BaseModel):
+    url: HttpUrl
 
 
 def require_user(authorization: str | None) -> str:
@@ -46,21 +50,46 @@ def safe_extract(url: str, *, flat: bool = False):
         "restrictfilenames": True,
         "skip_download": True,
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        if info.get("age_limit", 0) and info["age_limit"] >= 18:
-            raise HTTPException(403, "Age-restricted media is not supported")
-        return info
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except DownloadError as exc:
+        message = str(exc).strip().splitlines()[-1] if str(exc).strip() else "YouTube extraction failed"
+        if "JavaScript runtime" in message or "js runtime" in message.lower():
+            message += " Install Deno 2.3+ and make sure deno.exe is on PATH."
+        raise HTTPException(502, message) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"Media extraction failed: {exc}") from exc
+
+    age_limit = info.get("age_limit")
+    if age_limit and age_limit >= 18:
+        raise HTTPException(403, "Age-restricted media is not supported")
+    return info
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "ah-downloader-api",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "ytdapp-api"}
+    deno = shutil.which("deno")
+    return {
+        "ok": True,
+        "service": "ah-downloader-api",
+        "youtube_js_runtime": "deno" if deno else None,
+        "youtube_ready": bool(deno),
+    }
 
 
 @app.post("/auth/login")
 def login(req: LoginRequest):
-    # Replace this demo credential store with PostgreSQL/Argon2 in production.
     user = os.environ.get("YTD_DEMO_USER", "demo")
     password = os.environ.get("YTD_DEMO_PASSWORD", "change-me")
     if not secrets.compare_digest(req.username, user) or not secrets.compare_digest(req.password, password):
@@ -71,14 +100,50 @@ def login(req: LoginRequest):
 
 @app.get("/search")
 def search(q: str, limit: int = 20):
+    q = q.strip()
+    if not q:
+        raise HTTPException(400, "Search query is required")
     limit = max(1, min(limit, 50))
     info = safe_extract(f"ytsearch{limit}:{q}", flat=True)
     entries = info.get("entries") or []
     return {
         "items": [
-            {"id": e.get("id"), "title": e.get("title"), "url": e.get("webpage_url") or e.get("url"), "duration": e.get("duration"), "thumbnail": e.get("thumbnail")}
+            {
+                "id": e.get("id"),
+                "title": e.get("title") or "Untitled",
+                "url": e.get("webpage_url") or e.get("url"),
+                "duration": e.get("duration"),
+                "thumbnail": e.get("thumbnail"),
+            }
             for e in entries
+            if e.get("webpage_url") or e.get("url")
         ]
+    }
+
+
+@app.post("/playlist")
+def playlist(req: PlaylistRequest):
+    info = safe_extract(str(req.url), flat=True)
+    if info.get("_type") != "playlist" and not info.get("entries"):
+        raise HTTPException(400, "The URL is not a playlist")
+    entries = info.get("entries") or []
+    items = []
+    for e in entries:
+        url = e.get("webpage_url") or e.get("url")
+        if not url:
+            continue
+        items.append({
+            "id": e.get("id"),
+            "title": e.get("title") or "Untitled",
+            "url": url,
+            "duration": e.get("duration"),
+            "thumbnail": e.get("thumbnail"),
+        })
+    return {
+        "type": "playlist",
+        "title": info.get("title") or "YouTube Playlist",
+        "count": len(items),
+        "items": items,
     }
 
 
@@ -86,7 +151,12 @@ def search(q: str, limit: int = 20):
 def resolve(req: ResolveRequest):
     info = safe_extract(str(req.url))
     if info.get("_type") == "playlist" or info.get("entries"):
-        return {"type": "playlist", "title": info.get("title"), "count": len(info.get("entries") or []), "webpage_url": info.get("webpage_url")}
+        return {
+            "type": "playlist",
+            "title": info.get("title"),
+            "count": len(info.get("entries") or []),
+            "webpage_url": info.get("webpage_url"),
+        }
     formats = []
     for f in info.get("formats") or []:
         if not f.get("url") or f.get("protocol") in {"m3u8_native", "m3u8"}:
@@ -103,7 +173,12 @@ def resolve(req: ResolveRequest):
             "filesize": f.get("filesize") or f.get("filesize_approx"),
             "url": f.get("url"),
         })
-    return {"type": "media", "title": info.get("title"), "duration": info.get("duration"), "formats": formats}
+    return {
+        "type": "media",
+        "title": info.get("title") or "Download",
+        "duration": info.get("duration"),
+        "formats": formats,
+    }
 
 
 @app.post("/upload")
