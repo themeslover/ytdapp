@@ -2,6 +2,8 @@ package com.themeslover.ytdapp
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONObject
 import java.io.IOException
 
@@ -44,7 +46,7 @@ class ApiClient(
 
     fun resolve(baseUrl: String, mediaUrl: String, kind: String, quality: String): Format {
         val payload = JSONObject().put("url", mediaUrl).put("mode", kind.lowercase()).put("quality", quality)
-        val body = okhttp3.RequestBody.create("application/json".toMediaTypeCompat(), payload.toString())
+        val body = payload.toString().toRequestBody("application/json".toMediaType())
         val request = Request.Builder().url(normalize(baseUrl) + "/resolve").post(body).build()
         val response = client.newCall(request).execute()
         response.use {
@@ -67,8 +69,7 @@ class ApiClient(
                     ))
                 }
             }
-            val chosen = choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
-            return chosen
+            return choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
         }
     }
 
@@ -108,5 +109,3 @@ class ApiClient(
         body.take(160)
     }
 }
-
-private fun String.toMediaTypeCompat() = okhttp3.MediaType.Companion.parse(this)
