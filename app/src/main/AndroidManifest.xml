@@ -8,7 +8,10 @@
 
     <application
         android:theme="@style/Theme.YTDApp"
-        android:label="YTD App"
+        android:label="AH Downloader"
+        android:icon="@drawable/ic_ah_downloader"
+        android:roundIcon="@drawable/ic_ah_downloader"
+        android:usesCleartextTraffic="true"
         android:allowBackup="true"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
