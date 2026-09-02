@@ -4,6 +4,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.IOException
@@ -17,18 +18,52 @@ import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 
 class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
-    data class SearchItem(val title: String, val url: String, val duration: Long?, val thumbnail: String?)
-    data class PlaylistItem(val title: String, val url: String, val duration: Long?, val thumbnail: String?)
+    data class SearchItem(
+        val title: String,
+        val url: String,
+        val duration: Long?,
+        val thumbnail: String?,
+        val channel: String? = null,
+        val viewCount: Long? = null,
+        val uploadDate: String? = null,
+        val live: Boolean = false
+    )
+    data class PlaylistItem(
+        val title: String,
+        val url: String,
+        val duration: Long?,
+        val thumbnail: String?,
+        val channel: String? = null,
+        val index: Int? = null
+    )
+    data class BatchItem(
+        val title: String,
+        val url: String,
+        val duration: Long?,
+        val thumbnail: String?,
+        val channel: String? = null,
+        val index: Int? = null
+    )
+    data class BatchResult(val items: List<BatchItem>, val errors: List<String>)
     data class Format(val url: String, val ext: String?, val height: Int?, val abr: Double?, val vcodec: String?, val acodec: String?)
 
-    fun search(baseUrl: String, query: String): List<SearchItem> {
-        val url = normalize(baseUrl) + "/search?q=" + URLEncoder.encode(query, "UTF-8") + "&limit=20"
+    fun search(baseUrl: String, query: String, limit: Int = 30): List<SearchItem> {
+        val safeLimit = limit.coerceIn(1, 50)
+        val url = normalize(baseUrl) + "/search?q=" + URLEncoder.encode(query, "UTF-8") + "&limit=$safeLimit"
         val items = get(url).optJSONArray("items") ?: return emptyList()
         return buildList {
             for (i in 0 until items.length()) {
                 val item = items.optJSONObject(i) ?: continue
                 val mediaUrl = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(SearchItem(item.optString("title", "Untitled"), mediaUrl, item.optLongOrNull("duration"), item.optString("thumbnail").takeIf { it.isNotBlank() }))
+                add(SearchItem(
+                    item.optString("title", "Untitled"), mediaUrl,
+                    item.optLongOrNull("duration"),
+                    item.optString("thumbnail").takeIf { it.isNotBlank() },
+                    item.optString("channel").takeIf { it.isNotBlank() },
+                    item.optLongOrNull("view_count"),
+                    item.optString("upload_date").takeIf { it.isNotBlank() },
+                    item.optBoolean("live", false)
+                ))
             }
         }
     }
@@ -41,9 +76,47 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
             for (i in 0 until items.length()) {
                 val item = items.optJSONObject(i) ?: continue
                 val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
-                add(PlaylistItem(item.optString("title", "Untitled"), url, item.optLongOrNull("duration"), item.optString("thumbnail").takeIf { it.isNotBlank() }))
+                add(PlaylistItem(
+                    item.optString("title", "Untitled"), url,
+                    item.optLongOrNull("duration"),
+                    item.optString("thumbnail").takeIf { it.isNotBlank() },
+                    item.optString("channel").takeIf { it.isNotBlank() },
+                    item.optInt("index").takeIf { it > 0 }
+                ))
             }
         }
+    }
+
+    fun batch(baseUrl: String, urls: List<String>, maxItems: Int = 500): BatchResult {
+        if (urls.isEmpty()) return BatchResult(emptyList(), emptyList())
+        val array = JSONArray()
+        urls.take(50).forEach { array.put(it) }
+        val body = JSONObject().put("urls", array).put("max_items", maxItems.coerceIn(1, 1000))
+            .toString().toRequestBody("application/json".toMediaType())
+        val request = Request.Builder().url(normalize(baseUrl) + "/batch").post(body).build()
+        val json = executeJson(request)
+        val items = buildList {
+            val source = json.optJSONArray("items") ?: JSONArray()
+            for (i in 0 until source.length()) {
+                val item = source.optJSONObject(i) ?: continue
+                val url = item.optString("url").takeIf { it.isNotBlank() } ?: continue
+                add(BatchItem(
+                    item.optString("title", "Untitled"), url,
+                    item.optLongOrNull("duration"),
+                    item.optString("thumbnail").takeIf { it.isNotBlank() },
+                    item.optString("channel").takeIf { it.isNotBlank() },
+                    item.optInt("index").takeIf { it > 0 }
+                ))
+            }
+        }
+        val errors = buildList {
+            val source = json.optJSONArray("errors") ?: JSONArray()
+            for (i in 0 until source.length()) {
+                val item = source.optJSONObject(i) ?: continue
+                add("${item.optString("url")}: ${item.optString("error", "Unknown error")}")
+            }
+        }
+        return BatchResult(items, errors)
     }
 
     fun resolve(baseUrl: String, mediaUrl: String, kind: String, quality: String): Format {
@@ -61,8 +134,6 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
             }
         }
         val selected = choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
-        // Return the server endpoint instead of a short-lived provider URL. The server
-        // performs final format selection and video/audio merging with FFmpeg when available.
         return selected.copy(url = downloadUrl(baseUrl, mediaUrl, kind, quality))
     }
 
