@@ -1,7 +1,6 @@
 package com.themeslover.ytdapp
 
 import android.Manifest
-import android.app.Activity
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -10,8 +9,6 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,14 +26,14 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
-import androidx.compose.material3.rememberTopAppBarState
-import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -96,11 +93,10 @@ class MainActivity : ComponentActivity() {
         var kind by remember { mutableStateOf(MediaKind.VIDEO) }
         var quality by remember { mutableStateOf("best") }
         var expanded by remember { mutableStateOf(false) }
-        var refresh by remember { mutableStateOf(0) }
         val workManager = remember { WorkManager.getInstance(this@MainActivity) }
         val works = workManager.getWorkInfosByTagFlow("ytd-download").collectAsState(initial = emptyList()).value
 
-        Scaffold(topBar = { TopAppBar(title = { Text("YTD App") }, scrollBehavior = null) }) { padding ->
+        Scaffold(topBar = { TopAppBar(title = { Text("YTD App") }) }) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Downloads work without an account. Sign-in is not required to start a download.", style = MaterialTheme.typography.bodyMedium)
                 OutlinedTextField(url, { url = it }, Modifier.fillMaxWidth(), label = { Text("Direct media URL") }, singleLine = true)
@@ -133,7 +129,6 @@ class MainActivity : ComponentActivity() {
                         .build()
                     workManager.enqueueUniqueWork("download-$id", ExistingWorkPolicy.KEEP, request)
                     url = ""
-                    refresh++
                 }, Modifier.fillMaxWidth()) { Text("Start Download") }
 
                 Text("Download history", style = MaterialTheme.typography.titleMedium)
