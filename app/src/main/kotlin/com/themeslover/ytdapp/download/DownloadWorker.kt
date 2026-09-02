@@ -9,6 +9,10 @@ import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import com.themeslover.ytdapp.LocalMediaEngine
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.IOException
 
 class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
@@ -19,23 +23,16 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         val kind = inputData.getString(KEY_KIND).orEmpty()
         val quality = inputData.getString(KEY_QUALITY) ?: "best"
         val requestId = inputData.getString(KEY_ID) ?: id.toString()
+
         createChannel()
         setForeground(createForegroundInfo(requestId, title, 0))
-        val request = DownloadRequest(
-            requestId,
-            source,
-            title,
-            if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO,
-            quality,
-            outputUri = output,
-            attempt = runAttemptCount
-        )
 
-        fun progressData(bytes: Long, total: Long, percent: Int) = workDataOf(
+        fun progressData(bytes: Long, total: Long, percent: Int, message: String = "") = workDataOf(
             "bytes" to bytes,
             "total" to total,
             "percent" to percent,
             "attempt" to runAttemptCount,
+            "message" to message,
             KEY_SOURCE to source,
             KEY_TITLE to title,
             KEY_OUTPUT to output,
@@ -43,61 +40,86 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
             KEY_QUALITY to quality
         )
 
-        setProgress(progressData(0L, 0L, 0))
+        setProgress(progressData(0L, 0L, 0, "Starting"))
 
         return try {
-            val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
-                val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
-                setProgress(progressData(done, total, percent))
-                setForeground(createForegroundInfo(requestId, title, percent))
+            withContext(Dispatchers.IO) {
+                LocalMediaEngine.download(
+                    context = applicationContext,
+                    sourceUrl = source,
+                    title = title,
+                    outputUri = output,
+                    kind = kind,
+                    quality = quality,
+                    processId = requestId,
+                    onProgress = { percent, message ->
+                        setProgress(progressData(0L, 0L, percent, message))
+                        setForeground(createForegroundInfo(requestId, title, percent))
+                    }
+                )
             }
-            setProgress(progressData(result.bytesDownloaded, result.totalBytes, 100))
+            setProgress(progressData(0L, 0L, 100, "Complete"))
             Result.success(workDataOf("outputUri" to output, KEY_TITLE to title))
-        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        } catch (cancelled: CancellationException) {
+            LocalMediaEngine.cancel(requestId)
             throw cancelled
-        } catch (e: IOException) {
-            val retryable = isRetryable(e)
-            if (retryable && runAttemptCount < MAX_RETRIES) {
-                Result.retry()
-            } else {
-                Result.failure(
-                    workDataOf(
-                        "error" to (e.message ?: "Download failed"),
-                        "attempts" to (runAttemptCount + 1),
-                        KEY_SOURCE to source,
-                        KEY_TITLE to title,
-                        KEY_OUTPUT to output,
-                        KEY_KIND to kind,
-                        KEY_QUALITY to quality
+        } catch (localError: Throwable) {
+            // Keep the old LAN/cloud backend as a compatibility fallback. A user
+            // normally never needs it, but an installed server can still handle
+            // sources which the bundled runtime cannot process on a given device.
+            try {
+                val request = DownloadRequest(
+                    requestId,
+                    source,
+                    title,
+                    if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO,
+                    quality,
+                    outputUri = output,
+                    attempt = runAttemptCount
+                )
+                withContext(Dispatchers.IO) {
+                    val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
+                        val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
+                        setProgress(progressData(done, total, percent, "Downloading"))
+                        setForeground(createForegroundInfo(requestId, title, percent))
+                    }
+                    setProgress(progressData(result.bytesDownloaded, result.totalBytes, 100, "Complete"))
+                }
+                Result.success(workDataOf("outputUri" to output, KEY_TITLE to title))
+            } catch (fallbackError: Throwable) {
+                val error = fallbackError.message ?: localError.message ?: "Download failed"
+                if (isRetryable(error) && runAttemptCount < MAX_RETRIES) {
+                    Result.retry()
+                } else {
+                    Result.failure(
+                        workDataOf(
+                            "error" to error,
+                            "attempts" to (runAttemptCount + 1),
+                            KEY_SOURCE to source,
+                            KEY_TITLE to title,
+                            KEY_OUTPUT to output,
+                            KEY_KIND to kind,
+                            KEY_QUALITY to quality
+                        )
                     )
-                )
+                }
             }
-        } catch (e: Throwable) {
-            Result.failure(
-                workDataOf(
-                    "error" to (e.message ?: "Download failed"),
-                    KEY_SOURCE to source,
-                    KEY_TITLE to title,
-                    KEY_OUTPUT to output,
-                    KEY_KIND to kind,
-                    KEY_QUALITY to quality
-                )
-            )
         }
     }
 
-    private fun isRetryable(error: IOException): Boolean {
-        val message = error.message.orEmpty().lowercase()
-        return message.contains("temporary") ||
-            message.contains("timeout") ||
-            message.contains("timed out") ||
-            message.contains("connection") ||
-            message.contains("reset") ||
-            message.contains("429") ||
-            message.contains("500") ||
-            message.contains("502") ||
-            message.contains("503") ||
-            message.contains("504")
+    private fun isRetryable(message: String): Boolean {
+        val text = message.lowercase()
+        return text.contains("temporary") ||
+            text.contains("timeout") ||
+            text.contains("timed out") ||
+            text.contains("connection") ||
+            text.contains("reset") ||
+            text.contains("429") ||
+            text.contains("500") ||
+            text.contains("502") ||
+            text.contains("503") ||
+            text.contains("504") ||
+            text.contains("network")
     }
 
     private fun createChannel() {
