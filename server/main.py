@@ -12,7 +12,7 @@ from pydantic import BaseModel, HttpUrl
 import yt_dlp
 from yt_dlp.utils import DownloadError
 
-app = FastAPI(title="AH Downloader API", version="0.3.1")
+app = FastAPI(title="AH Downloader API", version="0.4.0")
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_urlsafe(32))
 
 
@@ -29,6 +29,11 @@ class ResolveRequest(BaseModel):
 
 class PlaylistRequest(BaseModel):
     url: HttpUrl
+
+
+class BatchRequest(BaseModel):
+    urls: list[HttpUrl]
+    max_items: int = 500
 
 
 def require_user(authorization: str | None) -> str:
@@ -72,9 +77,28 @@ def cleanup_dir(path: str):
     shutil.rmtree(path, ignore_errors=True)
 
 
+def playlist_items(info: dict) -> list[dict]:
+    entries = info.get("entries") or []
+    items = []
+    for e in entries:
+        url = e.get("webpage_url") or e.get("url")
+        if not url:
+            continue
+        items.append({
+            "id": e.get("id"),
+            "title": e.get("title") or "Untitled",
+            "url": url,
+            "duration": e.get("duration"),
+            "thumbnail": e.get("thumbnail"),
+            "channel": e.get("channel") or e.get("uploader"),
+            "index": e.get("playlist_index"),
+        })
+    return items
+
+
 @app.get("/")
 def root():
-    return {"service": "ah-downloader-api", "status": "ok", "docs": "/docs", "health": "/health"}
+    return {"service": "ah-downloader-api", "status": "ok", "version": "0.4.0", "docs": "/docs", "health": "/health"}
 
 
 @app.get("/health")
@@ -103,9 +127,17 @@ def search(q: str, limit: int = 20):
     limit = max(1, min(limit, 50))
     info = safe_extract(f"ytsearch{limit}:{q}", flat=True)
     entries = info.get("entries") or []
-    return {"items": [{"id": e.get("id"), "title": e.get("title") or "Untitled",
-                       "url": e.get("webpage_url") or e.get("url"), "duration": e.get("duration"),
-                       "thumbnail": e.get("thumbnail")} for e in entries if e.get("webpage_url") or e.get("url")]}
+    return {"items": [{
+        "id": e.get("id"),
+        "title": e.get("title") or "Untitled",
+        "url": e.get("webpage_url") or e.get("url"),
+        "duration": e.get("duration"),
+        "thumbnail": e.get("thumbnail"),
+        "channel": e.get("channel") or e.get("uploader"),
+        "view_count": e.get("view_count"),
+        "upload_date": e.get("upload_date"),
+        "live": bool(e.get("is_live")),
+    } for e in entries if e.get("webpage_url") or e.get("url")]}
 
 
 @app.post("/playlist")
@@ -113,15 +145,37 @@ def playlist(req: PlaylistRequest):
     info = safe_extract(str(req.url), flat=True)
     if info.get("_type") != "playlist" and not info.get("entries"):
         raise HTTPException(400, "The URL is not a playlist")
-    entries = info.get("entries") or []
-    items = []
-    for e in entries:
-        url = e.get("webpage_url") or e.get("url")
-        if not url:
-            continue
-        items.append({"id": e.get("id"), "title": e.get("title") or "Untitled", "url": url,
-                      "duration": e.get("duration"), "thumbnail": e.get("thumbnail")})
+    items = playlist_items(info)
     return {"type": "playlist", "title": info.get("title") or "YouTube Playlist", "count": len(items), "items": items}
+
+
+@app.post("/batch")
+def batch(req: BatchRequest):
+    max_items = max(1, min(req.max_items, 1000))
+    output = []
+    seen = set()
+    errors = []
+    for raw in req.urls:
+        if len(output) >= max_items:
+            break
+        url = str(raw)
+        try:
+            info = safe_extract(url, flat=True)
+            if info.get("entries") or info.get("_type") == "playlist":
+                candidates = playlist_items(info)
+            else:
+                candidates = [{"id": info.get("id"), "title": info.get("title") or "Untitled", "url": info.get("webpage_url") or url,
+                               "duration": info.get("duration"), "thumbnail": info.get("thumbnail"),
+                               "channel": info.get("channel") or info.get("uploader"), "index": None}]
+            for item in candidates:
+                item_url = item.get("url")
+                if not item_url or item_url in seen or len(output) >= max_items:
+                    continue
+                seen.add(item_url)
+                output.append(item)
+        except HTTPException as exc:
+            errors.append({"url": url, "error": str(exc.detail)})
+    return {"items": output, "count": len(output), "errors": errors}
 
 
 @app.post("/resolve")
@@ -143,7 +197,6 @@ def resolve(req: ResolveRequest):
 
 @app.get("/download")
 def download(url: HttpUrl, mode: str = "video", quality: str = "best"):
-    """Download media on the server, merging separate video/audio streams when FFmpeg is available."""
     source = str(url)
     is_audio = mode.lower() == "audio"
     height = height_selector(quality)
