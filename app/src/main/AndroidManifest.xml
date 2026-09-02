@@ -14,6 +14,7 @@
         android:icon="@drawable/ic_ah_downloader"
         android:roundIcon="@drawable/ic_ah_downloader"
         android:usesCleartextTraffic="true"
+        android:extractNativeLibs="true"
         android:allowBackup="true"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
