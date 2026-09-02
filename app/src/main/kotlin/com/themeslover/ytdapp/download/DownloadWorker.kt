@@ -13,29 +13,39 @@ import java.io.IOException
 
 class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        val source = inputData.getString(KEY_SOURCE) ?: return Result.failure()
+        val source = inputData.getString(KEY_SOURCE) ?: return Result.failure(workDataOf("error" to "Missing source URL"))
         val title = inputData.getString(KEY_TITLE) ?: "Download"
-        val output = inputData.getString(KEY_OUTPUT) ?: return Result.failure()
+        val output = inputData.getString(KEY_OUTPUT) ?: return Result.failure(workDataOf("error" to "Missing destination"))
         val kind = inputData.getString(KEY_KIND).orEmpty()
         val requestId = inputData.getString(KEY_ID) ?: id.toString()
         createChannel()
         setForeground(createForegroundInfo(requestId, title, 0))
-        val request = DownloadRequest(requestId, source, title, if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO, inputData.getString(KEY_QUALITY) ?: "best", outputUri = output)
+        val request = DownloadRequest(requestId, source, title, if (kind == MediaKind.AUDIO.name) MediaKind.AUDIO else MediaKind.VIDEO, inputData.getString(KEY_QUALITY) ?: "best", outputUri = output, attempt = runAttemptCount)
         return try {
             val result = HttpMediaDownloader(applicationContext.contentResolver).download(request) { done, total ->
                 val percent = if (total > 0) ((done * 100) / total).toInt().coerceIn(0, 100) else 0
-                setProgress(workDataOf("bytes" to done, "total" to total, "percent" to percent))
+                setProgress(workDataOf("bytes" to done, "total" to total, "percent" to percent, "attempt" to runAttemptCount))
                 setForeground(createForegroundInfo(requestId, title, percent))
             }
-            setProgress(workDataOf("bytes" to result.bytesDownloaded, "total" to result.totalBytes, "percent" to 100))
+            setProgress(workDataOf("bytes" to result.bytesDownloaded, "total" to result.totalBytes, "percent" to 100, "attempt" to runAttemptCount))
             Result.success(workDataOf("outputUri" to output))
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (e: IOException) {
-            if (runAttemptCount < 3) Result.retry() else Result.failure(workDataOf("error" to (e.message ?: "Download failed")))
+            val retryable = isRetryable(e)
+            if (retryable && runAttemptCount < MAX_RETRIES) {
+                Result.retry()
+            } else {
+                Result.failure(workDataOf("error" to (e.message ?: "Download failed"), "attempts" to (runAttemptCount + 1)))
+            }
         } catch (e: Throwable) {
             Result.failure(workDataOf("error" to (e.message ?: "Download failed")))
         }
+    }
+
+    private fun isRetryable(error: IOException): Boolean {
+        val message = error.message.orEmpty().lowercase()
+        return message.contains("temporary") || message.contains("timeout") || message.contains("timed out") || message.contains("connection") || message.contains("reset") || message.contains("429") || message.contains("500") || message.contains("502") || message.contains("503") || message.contains("504")
     }
 
     private fun createChannel() {
@@ -64,5 +74,6 @@ class DownloadWorker(appContext: Context, params: WorkerParameters) : CoroutineW
         const val KEY_KIND = "kind"
         const val KEY_QUALITY = "quality"
         private const val CHANNEL_ID = "downloads"
+        private const val MAX_RETRIES = 3
     }
 }
