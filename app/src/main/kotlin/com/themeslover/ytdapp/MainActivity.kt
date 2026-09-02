@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -36,6 +35,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -94,7 +94,12 @@ class MainActivity : ComponentActivity() {
         val safe = title.replace(Regex("[^A-Za-z0-9._-]"), "_").take(90).ifBlank { "download" }
         val ext = extension?.lowercase()?.let { if (it.startsWith(".")) it else ".${it}" } ?: if (kind == MediaKind.AUDIO) ".m4a" else ".mp4"
         val display = if (safe.endsWith(ext, true)) safe else safe + ext
-        val mime = when (ext) { ".m4a" -> "audio/mp4"; ".webm" -> if (kind == MediaKind.AUDIO) "audio/webm" else "video/webm"; ".mp3" -> "audio/mpeg"; else -> if (kind == MediaKind.AUDIO) "audio/*" else "video/mp4" }
+        val mime = when (ext) {
+            ".m4a" -> "audio/mp4"
+            ".webm" -> if (kind == MediaKind.AUDIO) "audio/webm" else "video/webm"
+            ".mp3" -> "audio/mpeg"
+            else -> if (kind == MediaKind.AUDIO) "audio/*" else "video/mp4"
+        }
         return if (Build.VERSION.SDK_INT >= 29) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, display)
@@ -150,12 +155,19 @@ class MainActivity : ComponentActivity() {
         }
 
         fun retry(info: WorkInfo) {
-            val data = info.inputData
+            // WorkInfo does not expose the original input Data. DownloadWorker copies
+            // retry metadata into outputData when it fails, so use that payload here.
+            val data = info.outputData
             val source = data.getString(DownloadWorker.KEY_SOURCE).orEmpty()
             if (source.isBlank()) { status = "This download cannot be retried"; return }
+            val title = data.getString(DownloadWorker.KEY_TITLE) ?: "Download"
+            val output = data.getString(DownloadWorker.KEY_OUTPUT)
+            val savedKind = data.getString(DownloadWorker.KEY_KIND) ?: kind.name
+            val savedQuality = data.getString(DownloadWorker.KEY_QUALITY) ?: quality
+            if (output.isNullOrBlank()) { status = "Retry destination is unavailable"; return }
             val id = UUID.randomUUID().toString()
             val request = OneTimeWorkRequestBuilder<DownloadWorker>()
-                .setInputData(data.toBuilder().putString(DownloadWorker.KEY_ID, id).build())
+                .setInputData(workDataOf(DownloadWorker.KEY_ID to id, DownloadWorker.KEY_SOURCE to source, DownloadWorker.KEY_TITLE to title, DownloadWorker.KEY_OUTPUT to output, DownloadWorker.KEY_KIND to savedKind, DownloadWorker.KEY_QUALITY to savedQuality))
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
                 .addTag("ytd-download")
                 .build()
@@ -254,32 +266,57 @@ class MainActivity : ComponentActivity() {
         val active = works.count { it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED }
         val completed = works.count { it.state == WorkInfo.State.SUCCEEDED }
         val failed = works.count { it.state == WorkInfo.State.FAILED }
-        Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Download Manager", style = MaterialTheme.typography.headlineSmall); Text("$active active • $completed completed • $failed failed")
-            OutlinedTextField(playlistUrl, onPlaylist, Modifier.fillMaxWidth(), label = { Text("YouTube Playlist URL") }, singleLine = true)
-            Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Preparing..." else "Download Playlist") }
-            AssistChip(onClick = {}, label = { Text(status) })
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) { items(works, key = { it.id }) { info -> DownloadWorkCard(info, onCancel, onRetry, onRemove) } }
+        LazyColumn(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            item { Text("Downloads", style = MaterialTheme.typography.headlineSmall); Text("Active: $active  •  Completed: $completed  •  Failed: $failed") }
+            item { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("Playlist queue", style = MaterialTheme.typography.titleMedium); OutlinedTextField(playlistUrl, onPlaylist, Modifier.fillMaxWidth(), label = { Text("Playlist URL") }, singleLine = true); Button(onClick = onDownload, enabled = playlistUrl.isNotBlank() && !loading, modifier = Modifier.fillMaxWidth()) { if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp) else Icon(Icons.Default.Download, null); Spacer(Modifier.size(6.dp)); Text(if (loading) "Reading..." else "Queue playlist") } } } }
+            item { AssistChip(onClick = {}, label = { Text(status) }) }
+            items(works, key = { it.id.toString() }) { info -> DownloadWorkCard(info, onCancel, onRetry, onRemove) }
         }
     }
 
     @Composable
     private fun DownloadWorkCard(info: WorkInfo, onCancel: (WorkInfo) -> Unit, onRetry: (WorkInfo) -> Unit, onRemove: (WorkInfo) -> Unit) {
-        val percent = info.progress.getInt("percent", 0).coerceIn(0, 100)
-        val data = info.inputData
-        val title = data.getString(DownloadWorker.KEY_TITLE) ?: "Download"
-        val kind = data.getString(DownloadWorker.KEY_KIND) ?: "VIDEO"
+        val progress = info.progress.getInt("percent", 0).coerceIn(0, 100)
+        val title = info.progress.getString(DownloadWorker.KEY_TITLE) ?: info.outputData.getString(DownloadWorker.KEY_TITLE) ?: "Download"
         val error = info.outputData.getString("error")
-        Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis); Text(kind, style = MaterialTheme.typography.bodySmall); when (info.state) { WorkInfo.State.RUNNING, WorkInfo.State.ENQUEUED -> { Text(if (percent > 0) "Downloading $percent%" else "Queued"); androidx.compose.material3.LinearProgressIndicator(progress = { percent / 100f }, modifier = Modifier.fillMaxWidth()); OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") } }; WorkInfo.State.SUCCEEDED -> { Text("Completed", color = MaterialTheme.colorScheme.primary); OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } }; WorkInfo.State.FAILED -> { Text(error ?: "Download failed", color = MaterialTheme.colorScheme.error); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Retry") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.CANCELLED -> { Text("Cancelled"); Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { Button(onClick = { onRetry(info) }) { Text("Resume") }; OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") } } }; WorkInfo.State.BLOCKED -> Text("Waiting") } } }
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(info.state.name.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() })
+                if (info.state == WorkInfo.State.RUNNING || info.state == WorkInfo.State.ENQUEUED) LinearProgressIndicator(progress = { progress / 100f }, modifier = Modifier.fillMaxWidth())
+                if (!error.isNullOrBlank()) Text(error, style = MaterialTheme.typography.bodySmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (info.state == WorkInfo.State.RUNNING || info.state == WorkInfo.State.ENQUEUED) OutlinedButton(onClick = { onCancel(info) }) { Text("Cancel") }
+                    if (info.state == WorkInfo.State.FAILED) Button(onClick = { onRetry(info) }) { Text("Retry") }
+                    if (info.state.isFinished) OutlinedButton(onClick = { onRemove(info) }) { Text("Remove") }
+                }
+            }
+        }
     }
 
     @Composable
-    private fun SettingsScreen(apiUrl: String, onApi: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Settings", style = MaterialTheme.typography.headlineSmall); OutlinedTextField(apiUrl, onApi, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true); Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save server") }; Text("Emulator: http://10.0.2.2:8000", style = MaterialTheme.typography.bodySmall); Text(status, style = MaterialTheme.typography.bodySmall) } }
+    private fun SettingsScreen(apiUrl: String, onApiUrl: (String) -> Unit, onSave: () -> Unit, status: String, modifier: Modifier) {
+        Column(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) { Text("Settings", style = MaterialTheme.typography.headlineSmall); OutlinedTextField(apiUrl, onApiUrl, Modifier.fillMaxWidth(), label = { Text("API server URL") }, singleLine = true); Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save") }; AssistChip(onClick = {}, label = { Text(status) }) }
+    }
 
     @Composable
-    private fun PlayerScreen(videoId: String, title: String, modifier: Modifier) { Column(modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) { Text(title, style = MaterialTheme.typography.titleLarge, maxLines = 2, overflow = TextOverflow.Ellipsis); Card(Modifier.fillMaxWidth().height(230.dp)) { androidx.compose.ui.viewinterop.AndroidView(modifier = Modifier.fillMaxSize(), factory = { ctx -> WebView(ctx).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.mediaPlaybackRequiresUserGesture = false; loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0") } }) }; Text("Uses YouTube's embedded player. Some videos may disable embedding.", style = MaterialTheme.typography.bodySmall) } }
+    private fun PlayerScreen(videoId: String, title: String, modifier: Modifier) {
+        Column(modifier.fillMaxSize().padding(8.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(8.dp)); androidx.compose.ui.viewinterop.AndroidView(factory = { context -> WebView(context).apply { settings.javaScriptEnabled = true; settings.domStorageEnabled = true; loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1&playsinline=1&rel=0") } }, modifier = Modifier.fillMaxWidth().weight(1f)) }
+    }
 
-    private fun extractVideoId(url: String): String? = runCatching { val uri = Uri.parse(url); when { uri.host.equals("youtu.be", true) -> uri.pathSegments.firstOrNull(); uri.getQueryParameter("v") != null -> uri.getQueryParameter("v"); uri.pathSegments.firstOrNull() == "shorts" -> uri.pathSegments.getOrNull(1); uri.pathSegments.firstOrNull() == "embed" -> uri.pathSegments.getOrNull(1); else -> null } }.getOrNull()?.takeIf { it.length in 8..20 }
+    private fun extractVideoId(url: String): String {
+        val patterns = listOf(
+            Regex("[?&]v=([A-Za-z0-9_-]{11})"),
+            Regex("youtu\\.be/([A-Za-z0-9_-]{11})"),
+            Regex("youtube\\.com/(?:shorts|embed)/([A-Za-z0-9_-]{11})")
+        )
+        return patterns.firstNotNullOfOrNull { it.find(url)?.groupValues?.getOrNull(1) } ?: url.substringAfterLast('/').substringBefore('?').take(11)
+    }
 
-    private fun formatDuration(seconds: Long): String { val h = seconds / 3600; val m = (seconds % 3600) / 60; val s = seconds % 60; return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s) }
+    private fun formatDuration(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+    }
 }
