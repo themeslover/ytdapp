@@ -60,10 +60,12 @@ class ApiClient(private val client: OkHttpClient = OkHttpClient()) {
                 add(Format(direct, f.optString("ext").takeIf { it.isNotBlank() }, f.optInt("height").takeIf { it > 0 }, f.optDouble("abr").takeIf { !it.isNaN() && it > 0 }, f.optString("vcodec").takeIf { it.isNotBlank() }, f.optString("acodec").takeIf { it.isNotBlank() }))
             }
         }
-        return choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
+        val selected = choose(candidates, kind, quality) ?: throw IOException("No compatible $kind format returned")
+        // Return the server endpoint instead of a short-lived provider URL. The server
+        // performs final format selection and video/audio merging with FFmpeg when available.
+        return selected.copy(url = downloadUrl(baseUrl, mediaUrl, kind, quality))
     }
 
-    /** Returns the server-side download endpoint. It is deliberately kept as a URL so WorkManager can stream it with resume support. */
     fun downloadUrl(baseUrl: String, mediaUrl: String, kind: String, quality: String): String {
         return normalize(baseUrl) + "/download?url=" + URLEncoder.encode(mediaUrl, "UTF-8") +
             "&mode=" + URLEncoder.encode(kind.lowercase(), "UTF-8") + "&quality=" + URLEncoder.encode(quality, "UTF-8")
